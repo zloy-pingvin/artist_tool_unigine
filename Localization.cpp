@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QStandardPaths>
 #include <QWidget>
 
 namespace ArtistTool
@@ -20,7 +21,7 @@ struct Language
 };
 
 // The editor has no API to query its UI language: read its own config
-// (%LOCALAPPDATA%/unigine/Editor/editor1.1.cfg, JSON). "editor/language" is written
+// (unigine/Editor/editor1.1.cfg in the per-user data folder, JSON). "editor/language" is written
 // when the language differs from the default English; "editor/keep_original_ui" = "1"
 // keeps the captions English and translates only the tooltips. Fallback: Cyrillic in
 // the main menu "File" action.
@@ -28,7 +29,12 @@ Language detect_language()
 {
 	Language language;
 
-	const QString config_path = qEnvironmentVariable("LOCALAPPDATA") + "/unigine/Editor/editor1.1.cfg";
+	// The config is in the per-user data folder: %LOCALAPPDATA% on Windows,
+	// ~/.local/share on Linux.
+	QString data_dir = qEnvironmentVariable("LOCALAPPDATA");
+	if (data_dir.isEmpty())
+		data_dir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+	const QString config_path = data_dir + "/unigine/Editor/editor1.1.cfg";
 	QFile file(config_path);
 	if (file.open(QIODevice::ReadOnly))
 	{
