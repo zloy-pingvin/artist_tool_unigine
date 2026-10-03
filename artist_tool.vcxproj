@@ -1,0 +1,180 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{52E9AFBF-27BE-3256-5599-44904755CA40}</ProjectGuid>
+    <ProjectName>artist_tool</ProjectName>
+    <WindowsTargetPlatformVersion>10.0.19041.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <PlatformToolset>v141</PlatformToolset>
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <OutDir>$(ProjectDir)../../../../bin/plugins/zloy_pingvin/artist_tool</OutDir>
+    <TargetName>zloy_pingvinartist_tool_editorplugin_double_x64d</TargetName>
+    <LocalDebuggerEnvironment>$(ProjectDir)../../../../bin/;%PATH%</LocalDebuggerEnvironment>
+    <LocalDebuggerCommand>$(ProjectDir)../../../../bin/Editor_double_x64d.exe</LocalDebuggerCommand>
+    <LocalDebuggerCommandArguments>-data_path ../ -console_command "world_load \"empty_cpp\""</LocalDebuggerCommandArguments>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <PlatformToolset>v141</PlatformToolset>
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <OutDir>$(ProjectDir)../../../../bin/plugins/zloy_pingvin/artist_tool</OutDir>
+    <TargetName>zloy_pingvinartist_tool_editorplugin_double_x64</TargetName>
+    <LocalDebuggerEnvironment>$(ProjectDir)../../../../bin/;%PATH%</LocalDebuggerEnvironment>
+    <LocalDebuggerCommand>$(ProjectDir)../../../../bin/Editor_double_x64.exe</LocalDebuggerCommand>
+    <LocalDebuggerCommandArguments>-data_path ../ -console_command "world_load \"empty_cpp\""</LocalDebuggerCommandArguments>
+  </PropertyGroup>
+  <!--
+    Two builds of the plugin.
+    The working one (the default): with the reference pages UI Gallery and Icons in the
+    Debug tab, built into bin/plugins of the project.
+    The one for the store (pass /p:ArtistToolStore=true to MSBuild): the reference pages
+    are not compiled into it at all. It is built into store_build/ next to the project
+    folder, so the working build stays as it is.
+
+    Both keep their intermediate files (objects, logs) out of the source folder, in
+    artist_tool_build/ next to the project folder: the source folder is the git
+    repository and what a package of the plugin is made from, and build leftovers must
+    not get into either.
+  -->
+  <PropertyGroup Condition="'$(ArtistToolStore)'!='true'">
+    <ArtistToolDevPages>true</ArtistToolDevPages>
+    <IntDir>$(ProjectDir)../../../../../artist_tool_build/$(Platform)/$(Configuration)/</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ArtistToolStore)'=='true'">
+    <ArtistToolDevPages>false</ArtistToolDevPages>
+    <OutDir>$(ProjectDir)../../../../../store_build/plugins/zloy_pingvin/artist_tool/</OutDir>
+    <IntDir>$(ProjectDir)../../../../../artist_tool_build/$(Platform)/Store_$(Configuration)/</IntDir>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" />
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <AdditionalIncludeDirectories>../../../../include;$(UNIGINE_QT653ROOT)/include;$(UNIGINE_QT653ROOT)/include/QtCore;$(UNIGINE_QT653ROOT)/include/QtGui;$(UNIGINE_QT653ROOT)/include/QtWidgets;$(UNIGINE_QT653ROOT)/mkspecs/win32-msvc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <FloatingPointModel>Fast</FloatingPointModel>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>DEBUG;QT_NO_DEBUG;UNIGINE_DOUBLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/Zc:__cplusplus /utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <TargetMachine>MachineX64</TargetMachine>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>../../../../lib;$(UNIGINE_QT653ROOT)/lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>Unigine_double_x64d.lib;EditorCore_double_x64d.lib;Qt6Core.lib;Qt6Gui.lib;Qt6Widgets.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ImportLibrary>$(ProjectDir)../../../../lib/plugins/zloy_pingvin/artist_tool/$(TargetName).lib</ImportLibrary>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <Optimization>Full</Optimization>
+      <AdditionalIncludeDirectories>../../../../include;$(UNIGINE_QT653ROOT)/include;$(UNIGINE_QT653ROOT)/include/QtCore;$(UNIGINE_QT653ROOT)/include/QtGui;$(UNIGINE_QT653ROOT)/include/QtWidgets;$(UNIGINE_QT653ROOT)/mkspecs/win32-msvc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <FloatingPointModel>Fast</FloatingPointModel>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>NDEBUG;QT_NO_DEBUG;UNIGINE_DOUBLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/Zc:__cplusplus /utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <TargetMachine>MachineX64</TargetMachine>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>../../../../lib;$(UNIGINE_QT653ROOT)/lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>Unigine_double_x64.lib;EditorCore_double_x64.lib;Qt6Core.lib;Qt6Gui.lib;Qt6Widgets.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ImportLibrary>$(ProjectDir)../../../../lib/plugins/zloy_pingvin/artist_tool/$(TargetName).lib</ImportLibrary>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(ArtistToolDevPages)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>ARTIST_TOOL_DEV_PAGES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(ArtistToolStore)'=='true'">
+    <Link>
+      <ImportLibrary>$(IntDir)$(TargetName).lib</ImportLibrary>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="artist_tool.cpp" />
+    <ClCompile Include="ArtistToolWindow.cpp" />
+    <ClCompile Include="ClutterUnpackPage.cpp" />
+    <ClCompile Include="ClutterUnpacker.cpp" />
+    <ClCompile Include="IconBrowserPage.cpp" Condition="'$(ArtistToolDevPages)'=='true'" />
+    <ClCompile Include="Localization.cpp" />
+    <ClCompile Include="ObjectPlacer.cpp" />
+    <ClCompile Include="ObjectPlacerPage.cpp" />
+    <ClCompile Include="PathPlacer.cpp" />
+    <ClCompile Include="PathPlacerPage.cpp" />
+    <ClCompile Include="PlaceableAsset.cpp" />
+    <ClCompile Include="UiGalleryPage.cpp" Condition="'$(ArtistToolDevPages)'=='true'" />
+    <ClCompile Include="UiHelpers.cpp" />
+    <ClCompile Include="ViewportPicking.cpp" />
+    <ClCompile Include="moc_artist_tool.cpp" />
+    <ClCompile Include="moc_ClutterUnpacker.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="ArtistToolWindow.h" />
+    <ClInclude Include="ClutterUnpackPage.h" />
+    <ClInclude Include="IconBrowserPage.h" />
+    <ClInclude Include="Localization.h" />
+    <ClInclude Include="ObjectPlacer.h" />
+    <ClInclude Include="ObjectPlacerPage.h" />
+    <ClInclude Include="PathPlacer.h" />
+    <ClInclude Include="PathPlacerPage.h" />
+    <ClInclude Include="PlaceableAsset.h" />
+    <ClInclude Include="UiGalleryPage.h" />
+    <ClInclude Include="UiHelpers.h" />
+    <ClInclude Include="ViewportPicking.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="ClutterUnpacker.h">
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Moc'ing %(Identity) ...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">%(RootDir)%(Directory)moc_%(Filename).cpp</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(UNIGINE_QT653ROOT)\bin\moc.exe;</AdditionalInputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">"$(UNIGINE_QT653ROOT)\bin\moc.exe" -DARCH_X64 -DWIN32 -DUNIGINE_DOUBLE -o "%(RootDir)%(Directory)moc_%(Filename).cpp" -I"$(ProjectDir)..\..\..\..\include" "%(FullPath)"</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">"$(UNIGINE_QT653ROOT)\bin\moc.exe" -DARCH_X64 -DWIN32 -DUNIGINE_DOUBLE -o "%(RootDir)%(Directory)moc_%(Filename).cpp" -I"$(ProjectDir)..\..\..\..\include" "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Moc'ing %(Identity) ...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">%(RootDir)%(Directory)moc_%(Filename).cpp</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(UNIGINE_QT653ROOT)\bin\moc.exe;</AdditionalInputs>
+    </CustomBuild>
+    <CustomBuild Include="artist_tool.h">
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Moc'ing %(Identity) ...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">%(RootDir)%(Directory)moc_%(Filename).cpp</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(UNIGINE_QT653ROOT)\bin\moc.exe;</AdditionalInputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">"$(UNIGINE_QT653ROOT)\bin\moc.exe" -DARCH_X64 -DWIN32 -DUNIGINE_DOUBLE -o "%(RootDir)%(Directory)moc_%(Filename).cpp" -I"$(ProjectDir)..\..\..\..\include" "%(FullPath)"</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">"$(UNIGINE_QT653ROOT)\bin\moc.exe" -DARCH_X64 -DWIN32 -DUNIGINE_DOUBLE -o "%(RootDir)%(Directory)moc_%(Filename).cpp" -I"$(ProjectDir)..\..\..\..\include" "%(FullPath)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Moc'ing %(Identity) ...</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">%(RootDir)%(Directory)moc_%(Filename).cpp</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(UNIGINE_QT653ROOT)\bin\moc.exe;</AdditionalInputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="artist_tool.json" />
+  </ItemGroup>
+  <ItemGroup>
+    <Natvis Include="../../../../utils/natvis/unigine_stl.natvis" />
+    <Natvis Include="../../../../utils/natvis/qt6_5.natvis" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="Qt6Exists" BeforeTargets="CustomBuild">
+    <Error Condition="!Exists('$(UNIGINE_QT653ROOT)\bin\moc.exe')" Text="The required Qt version is not found on your computer,&#xD;&#xA;please follow this link to see the instructions on resolving this issue.&#xD;&#xA;https://developer.unigine.com/en/docs/latest/editor2/extensions/environment" />
+  </Target>
+</Project>
