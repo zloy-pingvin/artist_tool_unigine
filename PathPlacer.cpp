@@ -126,6 +126,9 @@ float point_radius(const Math::Vec3 &position)
 }
 
 const float POINT_PICK_SCALE = 3.6f;
+// A selected point carries the manipulator of the editor. Its zone is barely larger
+// than its sphere, so the arrows of the manipulator stay with the editor.
+const float POINT_SELECTED_PICK_SCALE = 1.3f;
 
 NodePtr find_child(const NodePtr &node, const char *name)
 {
@@ -345,6 +348,7 @@ PathPlacer::~PathPlacer()
 {
 	on_changed = nullptr;
 	on_message = nullptr;
+	on_paths_changed = nullptr;
 	setActive(false);
 }
 
@@ -539,13 +543,16 @@ void PathPlacer::createPath()
 	root->setSaveToWorldEnabledRecursive(true);
 	::UnigineEditor::Undo::apply(new ::UnigineEditor::CreateNodesAction(root));
 
-	// The new path starts with the settings and the pattern that are on the page.
+	// The new path starts with the settings that are on the page and with an empty
+	// pattern: the assets of the previous path are not its own.
 	root_ = root;
 	arranged_state_.clear();
 	length_ = 0.0;
 	unplaced_ = 0;
+	pattern_.clear();
 	save_settings();
 	arranged_state_ = snapshot();
+	discard_if_empty_ = true;
 
 	Vector<NodePtr> selection;
 	selection.append(root);
@@ -565,6 +572,26 @@ void PathPlacer::setAddingPoints(bool adding)
 		return;
 
 	adding_points_ = adding;
+
+	// A path made by New Path is not kept if adding points to it is over before it
+	// got a single one: there is no current path then.
+	if (!adding && discard_if_empty_)
+	{
+		discard_if_empty_ = false;
+		if (hasPath() && getNumPoints() == 0)
+		{
+			const NodePtr root = root_;
+			root_ = NodePtr();
+			arranged_state_.clear();
+			length_ = 0.0;
+			unplaced_ = 0;
+			::UnigineEditor::Undo::apply(new ::UnigineEditor::RemoveNodesAction(root));
+			removed_root_ = root;
+			removed_root_frames_ = 0;
+			report(MSG_INFO, uiText("The new path got no points and was removed.",
+				"У новой кривой не появилось ни одной точки - она удалена."));
+		}
+	}
 	notify_changed();
 }
 
@@ -823,6 +850,10 @@ NodePtr PathPlacer::pick_point(const Math::Vec3 &p0, const Math::Vec3 &p1) const
 	// The zone a click picks a point in is much larger than its sphere, so the zones of
 	// points that are close on the screen overlap. The point the click is closest to,
 	// in parts of its zone, wins: a click right on a point always takes that point.
+	// While points are added the clicks are the tool's and the manipulator is not
+	// used: every point keeps the large zone then.
+	const bool manipulator = !adding_points_ && ::UnigineEditor::ObjectMode::isManipulatorsEnabled();
+	const Vector<NodePtr> selected = manipulator ? selected_points() : Vector<NodePtr>();
 	NodePtr picked;
 	double picked_miss = 0.0;
 	for (int i = 0, num = path->getNumChildren(); i < num; ++i)
@@ -836,7 +867,13 @@ NodePtr PathPlacer::pick_point(const Math::Vec3 &p0, const Math::Vec3 &p1) const
 			continue;
 		const Math::Vec3 closest = p0 + direction * Math::Scalar(along / ray_length);
 
-		const double radius = double(point_radius(position) * POINT_PICK_SCALE);
+		float pick_scale = POINT_PICK_SCALE;
+		for (const NodePtr &selected_point : selected)
+		{
+			if (selected_point->getID() == point->getID())
+				pick_scale = POINT_SELECTED_PICK_SCALE;
+		}
+		const double radius = double(point_radius(position) * pick_scale);
 		const double miss = double(Math::length(position - closest)) / radius;
 		if (miss > 1.0)
 			continue;
@@ -849,28 +886,21 @@ NodePtr PathPlacer::pick_point(const Math::Vec3 &p0, const Math::Vec3 &p1) const
 	return picked;
 }
 
-// Adds a point: after the selected one, before it if it is the first point of the
-// path (the path then grows from its start), at the end if none is selected.
-NodePtr PathPlacer::add_point(const Math::Vec3 &position)
+// Adds a point at the end of the path, whatever is selected: drawing only continues
+// the path. A point between two others is put by Subdivide.
+NodePtr PathPlacer::add_point(const Math::Vec3 &position, bool corner)
 {
 	const NodePtr path = path_node();
 	if (!path)
 		return NodePtr();
 
 	const int count = path->getNumChildren();
-	int index = count;
-	const Vector<NodePtr> selected = selected_points();
-	if (selected.size() == 1 && count > 1)
-	{
-		const int selected_index = path->getChildIndex(selected[0]);
-		index = selected_index == 0 ? 0 : selected_index + 1;
-	}
-
 	NodeDummyPtr point = NodeDummy::create();
 	point->setName(QString::fromUtf8(POINT_NODE_NAME).arg(count).toUtf8().constData());
 	point->setWorldParent(path);
-	path->setChildIndex(point, index);
 	point->setWorldPosition(position);
+	if (corner)
+		point->setData(CORNER_DATA, "1");
 	point->setShowInEditorEnabledRecursive(true);
 	point->setSaveToWorldEnabledRecursive(true);
 	::UnigineEditor::Undo::apply(new ::UnigineEditor::CreateNodesAction(point));
@@ -950,7 +980,20 @@ void PathPlacer::update_drag()
 	ignore.append(root_);
 	const SurfaceHit hit = raycastSurface(p0, p1, SurfaceFilter(), ignore);
 	if (hit.found)
+	{
 		drag_point_->setWorldPosition(hit.point);
+		return;
+	}
+
+	// No surface under the mouse: the point keeps its height and goes along the
+	// horizontal plane it is in, to where the mouse ray crosses that plane.
+	const Math::Vec3 position = drag_point_->getWorldPosition();
+	const Math::Vec3 direction = p1 - p0;
+	if (std::abs(double(direction.z)) < 1e-9)
+		return;
+	const double along = double(position.z - p0.z) / double(direction.z);
+	if (along > 0.0 && along <= 1.0)
+		drag_point_->setWorldPosition(p0 + direction * Math::Scalar(along));
 }
 
 void PathPlacer::end_drag()
@@ -1044,7 +1087,8 @@ bool PathPlacer::eventFilter(QObject *watched, QEvent *event)
 			const bool editor_snap = ::UnigineEditor::ObjectMode::isSnapToSurfaceEnabled();
 
 			// A click on a point selects it; Ctrl or Shift add it to the selection.
-			// Holding the button drags the point over the surfaces, selected or not.
+			// Holding the button drags the point over the surfaces (over the empty
+			// space - at its own height), selected or not.
 			if (NodePtr point = pick_point(p0, p1))
 			{
 				const bool add_to_selection = mouse->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier);
@@ -1076,16 +1120,16 @@ bool PathPlacer::eventFilter(QObject *watched, QEvent *event)
 			if (!adding_points_)
 				break;
 
+			// Ctrl makes the new point a corner right away.
 			Vector<NodePtr> ignore;
 			ignore.append(root_);
 			const SurfaceHit hit = raycastSurface(p0, p1, SurfaceFilter(), ignore);
 			if (!hit.found)
 				report(MSG_WARNING, uiText("Click on a surface to add a point there.", "Кликните по поверхности, чтобы добавить на неё точку."));
-			else if (NodePtr point = add_point(hit.point))
+			else if (NodePtr point = add_point(hit.point, mouse->modifiers() & Qt::ControlModifier))
 			{
-				// The new point gets selected, so the next one continues from it.
-				pending_selection_ = point;
-				pending_selection_adds_ = false;
+				// The new point is not selected: it is the last one and is drawn green,
+				// the point the next one continues from.
 				if (!editor_snap)
 					begin_drag(point, true);
 				report(MSG_INFO, QString());
@@ -1376,6 +1420,16 @@ void PathPlacer::update()
 	if (!active_)
 		return;
 
+	// A path the tool has removed is still in the world while it is being removed:
+	// the list of paths is built anew in a later frame, when it is gone (or a few
+	// frames later anyway, should the editor keep the node alive for its undo).
+	if (removed_root_ && (removed_root_.isDeleted() || ++removed_root_frames_ >= 3))
+	{
+		removed_root_ = NodePtr();
+		if (on_paths_changed)
+			on_paths_changed();
+	}
+
 	// The path was deleted or its world closed.
 	if (root_ && !hasPath())
 	{
@@ -1425,8 +1479,8 @@ void PathPlacer::draw(const Curve &curve) const
 	if (!path)
 		return;
 
-	// Points: the selected ones are orange, the first one is green (the path starts
-	// there), corners are white, smooth points blue.
+	// Points: the selected ones are orange, the last one is green (a drawn point is
+	// added after it), corners are white, smooth points blue.
 	//
 	// The editor gets the new selection only when the mouse button is released. Until
 	// then the points are shown the way they are going to be: a point picked without
@@ -1444,7 +1498,7 @@ void PathPlacer::draw(const Curve &curve) const
 		Math::vec4 color(0.35f, 0.7f, 1.0f, 1.0f);
 		if (is_corner(point))
 			color = Math::vec4(1.0f, 1.0f, 1.0f, 1.0f);
-		if (i == 0)
+		if (i == num - 1)
 			color = Math::vec4(0.3f, 0.9f, 0.3f, 1.0f);
 		for (const NodePtr &selected_point : selected)
 		{

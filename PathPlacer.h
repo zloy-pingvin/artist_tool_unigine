@@ -145,9 +145,9 @@ public:
 	void removeOldScript();
 
 	void createPath();
-	// While on, a left click on a surface in a viewport adds a point: after the
-	// selected point, or before it if it is the first one (the path grows from its
-	// start), or at the end if no point is selected.
+	// While on, a left click on a surface in a viewport adds a point at the end of
+	// the path, whatever is selected; with Ctrl it is a corner. A path made by createPath() that is left
+	// without points when this is turned off is removed.
 	// Whether it is on or not, a click on a point of the path selects it, and holding
 	// the button drags it over the surfaces.
 	void setAddingPoints(bool adding);
@@ -190,6 +190,9 @@ public:
 	// change.
 	std::function<void()> on_changed;
 	std::function<void(int level, const QString &text)> on_message;
+	// Called when a path the tool has removed is gone from the world, so that a list
+	// of the paths can be built anew.
+	std::function<void()> on_paths_changed;
 
 protected:
 	bool eventFilter(QObject *watched, QEvent *event) override;
@@ -237,7 +240,7 @@ private:
 	void draw(const Curve &curve) const;
 	QByteArray snapshot() const;
 	Unigine::NodePtr pick_point(const Unigine::Math::Vec3 &p0, const Unigine::Math::Vec3 &p1) const;
-	Unigine::NodePtr add_point(const Unigine::Math::Vec3 &position);
+	Unigine::NodePtr add_point(const Unigine::Math::Vec3 &position, bool corner);
 	void select_point(const Unigine::NodePtr &point, bool add_to_selection);
 	void begin_drag(const Unigine::NodePtr &point, bool is_new);
 	void update_drag();
@@ -255,6 +258,12 @@ private:
 	bool active_{false};
 	bool live_update_{true};
 	bool adding_points_{false};
+	// The current path has just been made by createPath(): if adding points to it ends
+	// with no points, it is removed.
+	bool discard_if_empty_{false};
+	// Such a path after it has been removed, until it is gone from the world.
+	Unigine::NodePtr removed_root_;
+	int removed_root_frames_{0};
 	// The press of the click in progress was taken by the tool; whether its release
 	// is to be kept from the editor as well.
 	bool click_taken_{false};

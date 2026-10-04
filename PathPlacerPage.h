@@ -29,6 +29,10 @@ public:
 
 	// Stops adding points and the live update.
 	void stop();
+	// Forgets the remembered settings of the page and puts its controls back to their
+	// defaults. The settings of the current path are kept in the path itself, in the
+	// world, and are left as they are.
+	void resetSettings();
 
 protected:
 	// The tool draws the path and keeps the objects on it only while its page is
@@ -79,6 +83,9 @@ private:
 	// The current path the last search did not find (e.g. it is inside a node
 	// reference): the world is not searched for it again and again.
 	int missing_path_id_{0};
+	// The current path the list was last marked for: when it is gone (deleted, or a
+	// new path left without points), the list is built anew.
+	int shown_path_id_{0};
 	QPushButton *new_path_button_{nullptr};
 	QPushButton *add_points_button_{nullptr};
 	QToolButton *smooth_button_{nullptr};

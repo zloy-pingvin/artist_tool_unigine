@@ -3,6 +3,7 @@
 #include "Localization.h"
 #include "ObjectPlacer.h"
 
+#include <QPointer>
 #include <QVector>
 #include <QWidget>
 
@@ -39,6 +40,10 @@ public:
 	// Creates the controls of the tool that are shown on the Debug tab of the window
 	// rather than on this page. The caller owns the returned widget.
 	QWidget *createDebugControls();
+
+	// Forgets the remembered settings of the page and puts its controls back to their
+	// defaults.
+	void resetSettings();
 
 protected:
 	// Switching to another tab or closing the window stops the tool, so that clicks
@@ -129,6 +134,7 @@ private:
 	QDoubleSpinBox *surface_offset_{nullptr};
 	// Set from the Debug tab, see createDebugControls().
 	bool move_while_held_{true};
+	QPointer<QCheckBox> move_while_held_check_;
 	Vec3Range local_offset_;
 	Vec3Range world_offset_;
 	AngleRange local_rotation_;

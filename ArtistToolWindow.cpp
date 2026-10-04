@@ -3,6 +3,7 @@
 #include "ClutterUnpackPage.h"
 #include "ObjectPlacerPage.h"
 #include "PathPlacerPage.h"
+#include "UiHelpers.h"
 
 #ifdef ARTIST_TOOL_DEV_PAGES
 	#include "IconBrowserPage.h"
@@ -13,8 +14,11 @@
 #include <editor/UniginePluginManager.h>
 
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -105,6 +109,19 @@ QWidget *ArtistToolWindow::build_debug_page()
 	placer_layout->addWidget(object_placer_page_->createDebugControls());
 	layout->addWidget(placer_group);
 
+	QHBoxLayout *reset_row = new QHBoxLayout;
+	QPushButton *reset_button = new QPushButton(QString::fromUtf8("Reset All Plugin Settings"));
+	reset_button->setIcon(makeResetIcon());
+	reset_button->setToolTip(Localization().tip(
+		"Puts every setting of the plugin, on all its tabs, back to its default - as "
+		"after a fresh install. The paths in the world keep their own settings.",
+		"Вернуть все настройки плагина на всех вкладках к значениям по умолчанию - как "
+		"после установки. Кривые в мире сохраняют свои собственные настройки."));
+	connect(reset_button, &QPushButton::clicked, this, [this]() { reset_all_settings(); });
+	reset_row->addWidget(reset_button);
+	reset_row->addStretch(1);
+	layout->addLayout(reset_row);
+
 #ifdef ARTIST_TOOL_DEV_PAGES
 	QTabWidget *reference_tabs = new QTabWidget;
 	reference_tabs->setDocumentMode(true);
@@ -120,6 +137,20 @@ QWidget *ArtistToolWindow::build_debug_page()
 	layout->addStretch(1);
 #endif
 	return page;
+}
+
+void ArtistToolWindow::reset_all_settings()
+{
+	const QMessageBox::StandardButton answer = QMessageBox::question(this,
+		QString::fromUtf8("Artist Tools"),
+		QString::fromUtf8("Reset all the settings of the plugin to their defaults?"),
+		QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+	if (answer != QMessageBox::Yes)
+		return;
+
+	object_placer_page_->resetSettings();
+	path_placer_page_->resetSettings();
+	clutter_unpack_page_->resetSettings();
 }
 
 void ArtistToolWindow::hideEvent(QHideEvent *event)

@@ -2,7 +2,7 @@
   "Name": "artist_tool",
   "Vendor": "zloy_pingvin",
   "Description": "Tools for artists: Object Placer (click to place assets on surfaces), Path Placer (objects and fences along a curve), Unpack Clutter (clutters into regular nodes). By zloy_pingvin - https://t.me/zloytux",
-  "Version": "1.0.0.0",
+  "Version": "1.0.3.0",
   "CompatVersion": "1.0.0.0",
   "Dependencies": []
 }

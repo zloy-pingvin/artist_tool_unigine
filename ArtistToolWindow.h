@@ -35,6 +35,8 @@ protected:
 private:
 	QWidget *build_debug_page();
 	QWidget *build_about_label();
+	// Asks, then puts every setting of every page back to its default.
+	void reset_all_settings();
 
 	QTabWidget *tabs_{nullptr};
 	ClutterUnpackPage *clutter_unpack_page_{nullptr};

@@ -67,6 +67,7 @@ ClutterUnpackPage::ClutterUnpackPage(QWidget *parent)
 	});
 
 	build_ui();
+	default_header_state_ = selection_tree_->header()->saveState();
 	load_settings();
 
 	connect(unpacker_, &ClutterUnpacker::started, this, [this](int total_nodes) {
@@ -331,6 +332,16 @@ void ClutterUnpackPage::load_settings()
 	const QByteArray header_state = settings.value("selection_header").toByteArray();
 	if (!header_state.isEmpty())
 		selection_tree_->header()->restoreState(header_state);
+}
+
+void ClutterUnpackPage::resetSettings()
+{
+	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
+	settings.remove(QString::fromUtf8(SETTINGS_GROUP));
+
+	// With nothing remembered every value is loaded as its default.
+	load_settings();
+	selection_tree_->header()->restoreState(default_header_state_);
 }
 
 void ClutterUnpackPage::save_settings() const

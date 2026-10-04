@@ -642,6 +642,7 @@ QWidget *ObjectPlacerPage::createDebugControls()
 
 	QCheckBox *check = new QCheckBox(QString::fromUtf8("Move While Button Is Held"));
 	check->setChecked(move_while_held_);
+	move_while_held_check_ = check;
 	check->setToolTip(loc_.tip(
 		"On: press the mouse button and do not release it - the object is placed and "
 		"keeps following the mouse over the surfaces, like with Snap to Surface. "
@@ -1000,6 +1001,19 @@ void ObjectPlacerPage::load_settings()
 
 	// The filter is not remembered: it always starts from its default.
 	reset_filter();
+}
+
+void ObjectPlacerPage::resetSettings()
+{
+	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
+	settings.remove(QString::fromUtf8(SETTINGS_GROUP));
+
+	// With nothing remembered every value is loaded as its default.
+	load_settings();
+	if (move_while_held_check_)
+		move_while_held_check_->setChecked(move_while_held_);
+	apply_options();
+	refresh();
 }
 
 void ObjectPlacerPage::save_settings() const

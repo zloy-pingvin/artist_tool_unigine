@@ -3,6 +3,7 @@
 #include "ClutterUnpacker.h"
 #include "Localization.h"
 
+#include <QByteArray>
 #include <QIcon>
 #include <QWidget>
 
@@ -28,6 +29,9 @@ public:
 
 	// Stops a running bake and restores the clutter being baked.
 	void cancel();
+	// Forgets the remembered settings of the page and puts its controls back to their
+	// defaults.
+	void resetSettings();
 
 private:
 	void build_ui();
@@ -48,6 +52,8 @@ private:
 
 	QLabel *selection_label_{nullptr};
 	QTreeWidget *selection_tree_{nullptr};
+	// The widths of the columns the list starts with.
+	QByteArray default_header_state_;
 	QIcon mesh_clutter_icon_;
 	QIcon node_clutter_icon_;
 

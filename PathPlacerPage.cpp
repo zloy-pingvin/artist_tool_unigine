@@ -70,6 +70,7 @@ PathPlacerPage::PathPlacerPage(QWidget *parent)
 		message_ = text;
 		refresh();
 	};
+	placer_->on_paths_changed = [this]() { rescan_paths(); };
 
 	connect(Selection::instance(), &Selection::changed, this, [this]() {
 		if (isVisible())
@@ -83,6 +84,7 @@ PathPlacerPage::~PathPlacerPage()
 {
 	placer_->on_changed = nullptr;
 	placer_->on_message = nullptr;
+	placer_->on_paths_changed = nullptr;
 	save_settings();
 }
 
@@ -204,28 +206,36 @@ void PathPlacerPage::build_ui()
 		"LMB On A Point - Select It\n"
 		"Ctrl / Shift + LMB On A Point - Add It To The Selection\n"
 		"LMB (Hold) On A Point + Mouse Move - Move It Over Surfaces\n"
-		"LMB On A Surface - Add Point (while Add Points is on)\n"
+		"LMB On A Surface - Add Point To The End (while Add Points is on)\n"
+		"Ctrl + LMB On A Surface - Add Corner Point To The End (while Add Points is on)\n"
 		"LMB (Hold) + Mouse Move - Move The Added Point Over Surfaces\n"
 		"Alt + LMB - Editor Camera (not taken by the tool)\n"
-		"Esc - Stop Adding Points\n"
+		"Esc - Stop Adding Points (a new path left without points is removed)\n"
 		"Delete - Remove The Selected Point Or Object\n"
-		"Ctrl + Z - Undo Added / Moved Point, Subdivide, Fill",
+		"Ctrl + Z - Undo New Path, Added / Moved Point, Subdivide, Fill",
 		"ЛКМ по точке - выделить её\n"
 		"Ctrl / Shift + ЛКМ по точке - добавить её к выделению\n"
 		"ЛКМ (держать) по точке + движение мыши - двигать её по поверхностям\n"
-		"ЛКМ по поверхности - добавить точку (пока включено «Добавить точки»)\n"
+		"ЛКМ по поверхности - добавить точку в конец кривой (пока включено «Добавить точки»)\n"
+		"Ctrl + ЛКМ по поверхности - добавить в конец угловую точку (пока включено «Добавить точки»)\n"
 		"ЛКМ (держать) + движение мыши - двигать добавленную точку по поверхностям\n"
 		"Alt + ЛКМ - камера редактора (инструмент её не перехватывает)\n"
-		"Esc - закончить добавление точек\n"
+		"Esc - закончить добавление точек (новая кривая без точек удаляется)\n"
 		"Delete - удалить выделенную точку или объект\n"
-		"Ctrl + Z - отменить добавление / сдвиг точки, разделение, заполнение"));
+		"Ctrl + Z - отменить создание кривой, добавление / сдвиг точки, разделение, заполнение"));
 	hotkeys->setWordWrap(true);
 	hotkeys->setContentsMargins(6, 2, 6, 6);
 	hotkeys->setToolTip(loc_.tip(
 		"LMB - the left mouse button. Points and objects are ordinary nodes: they are "
-		"moved, deleted and reordered in the World Hierarchy as usual.",
+		"moved, deleted and reordered in the World Hierarchy as usual.\n"
+		"Where there is no surface under the mouse, a dragged point keeps its height.\n"
+		"A selected point can also be moved with the manipulator of the editor: grab its "
+		"arrows a little away from the point.",
 		"[[LMB|ЛКМ]] - левая кнопка мыши. Точки и объекты - обычные ноды: их двигают, удаляют и "
-		"меняют местами в World Hierarchy как обычно."));
+		"меняют местами в World Hierarchy как обычно.\n"
+		"Если под курсором нет поверхности, перетаскиваемая точка остаётся на своей высоте.\n"
+		"Выделенную точку можно двигать и гизмо редактора: берите его стрелки чуть в "
+		"стороне от точки."));
 
 	hotkeys_header_ = makeSectionHeader(uiText("Hotkeys", "Горячие клавиши"), hotkeys);
 	hotkeys_header_->setToolTip(loc_.tip(
@@ -272,14 +282,17 @@ QWidget *PathPlacerPage::build_path_group()
 	add_points_button_->setToolTip(loc_.tip(
 		"While it is on, every left click on a surface in the viewport adds a point; hold "
 		"the button to drag it over the surfaces. Esc turns it off.\n"
-		"The point goes after the selected point. If the first point of the path is "
-		"selected, it goes before it - the path grows from its start. With no point "
-		"selected it goes to the end.\n"
+		"The point always goes to the end of the path, after the last point (it is "
+		"green in the viewport), whatever is selected. To put a point between two "
+		"others, use Subdivide.\n"
+		"Ctrl + click adds a corner point right away.\n"
 		"Points are ordinary nodes: delete them with Delete.",
 		"Пока включено, каждый клик левой кнопкой по поверхности во вьюпорте добавляет "
 		"точку; не отпуская кнопку, её можно тащить по поверхностям. Esc выключает.\n"
-		"Точка встаёт после выделенной. Если выделена первая точка кривой - перед ней: "
-		"кривая растёт от начала. Если не выделена ни одна - в конец.\n"
+		"Точка всегда встаёт в конец кривой, после последней (во вьюпорте она зелёная), "
+		"что бы ни было выделено. Чтобы поставить точку между двумя другими - "
+		"кнопка [[Subdivide|«Разделить»]].\n"
+		"Ctrl + клик сразу ставит угловую точку ([[Corner|«Угол»]]).\n"
 		"Точки - обычные ноды: удаляйте их клавишей Delete."));
 	buttons->addWidget(add_points_button_, 1);
 	layout->addLayout(buttons);
@@ -293,14 +306,14 @@ QWidget *PathPlacerPage::build_path_group()
 		"Select one or several points first: click a point in the viewport (Ctrl + click "
 		"adds to the selection) or pick it in the World Hierarchy.\n"
 		"In the viewport the selected points are orange, corners white, smooth points "
-		"blue, the first point of the path green.",
+		"blue, the last point of the path green.",
 		"Какие точки кривой выделены.\n"
 		"[[Smooth|Плавная]] - кривая проходит через точку плавно, без излома.\n"
 		"[[Corner|Угол]] - резкий излом: кривая приходит в точку и уходит из неё по прямой. "
 		"Для углов заборов и стен.\n"
 		"Сначала выделите одну или несколько точек: клик по точке во вьюпорте (Ctrl + клик "
 		"добавляет к выделению) или выбор в World Hierarchy.\n"
-		"Во вьюпорте выделенные точки оранжевые, угловые белые, обычные синие, первая "
+		"Во вьюпорте выделенные точки оранжевые, угловые белые, обычные синие, последняя "
 		"точка кривой зелёная.");
 	QHBoxLayout *point_row = new QHBoxLayout;
 	point_row->setSpacing(3);
@@ -384,9 +397,18 @@ QWidget *PathPlacerPage::build_path_group()
 	QLabel *paths_label = new QLabel(uiText("Paths in the world", "Кривые в мире"));
 	paths_label->setToolTip(paths_tooltip);
 	paths_header->addWidget(paths_label, 1);
-	paths_header->addWidget(makeResetButton(
-		loc_.tip("Look through the world for paths again.", "Заново найти кривые в мире."),
-		this, [this]() { rescan_paths(); }));
+	// The same look as Subdivide: an action with an icon and a caption.
+	QToolButton *rescan_button = new QToolButton;
+	rescan_button->setText(uiText("Find Paths", "Найти кривые"));
+	rescan_button->setIcon(editor_icon(":/images/icon_go_to_asset.png"));
+	rescan_button->setIconSize(BUTTON_ICON_SIZE);
+	rescan_button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+	rescan_button->setFocusPolicy(Qt::NoFocus);
+	rescan_button->setStyleSheet(point_button_style
+		+ QString::fromUtf8("QToolButton:pressed { background-color: #5c6066; }"));
+	rescan_button->setToolTip(loc_.tip("Look through the world for paths again.", "Заново найти кривые в мире."));
+	connect(rescan_button, &QToolButton::clicked, this, [this]() { rescan_paths(); });
+	paths_header->addWidget(rescan_button);
 	layout->addLayout(paths_header);
 
 	paths_list_ = new QListWidget;
@@ -727,6 +749,16 @@ void PathPlacerPage::load_settings()
 	connect(ground_offset_, &QDoubleSpinBox::valueChanged, this, [this](double) { apply_settings(); });
 }
 
+void PathPlacerPage::resetSettings()
+{
+	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
+	settings.remove(QString::fromUtf8(SETTINGS_GROUP));
+
+	hotkeys_header_->setChecked(true);
+	if (!placer_->hasPath())
+		placer_->setSettings(PathSettings());
+}
+
 void PathPlacerPage::save_settings() const
 {
 	const PathSettings &last = placer_->getSettings();
@@ -944,6 +976,14 @@ void PathPlacerPage::rescan_paths()
 void PathPlacerPage::refresh_paths(bool rescan_if_missing)
 {
 	const int current_id = placer_->getPathId();
+
+	const bool path_gone = shown_path_id_ != 0 && current_id == 0;
+	shown_path_id_ = current_id;
+	if (path_gone && rescan_if_missing)
+	{
+		rescan_paths();
+		return;
+	}
 
 	int row = -1;
 	for (int i = 0; i < paths_.size(); ++i)
