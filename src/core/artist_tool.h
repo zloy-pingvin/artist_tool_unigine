@@ -15,7 +15,7 @@ class artist_tool : public QObject, public ::UnigineEditor::Plugin
 {
 	Q_OBJECT
 	Q_DISABLE_COPY(artist_tool)
-	Q_PLUGIN_METADATA(IID UNIGINE_EDITOR_PLUGIN_IID FILE "artist_tool.json")
+	Q_PLUGIN_METADATA(IID UNIGINE_EDITOR_PLUGIN_IID FILE "../../artist_tool.json")
 	Q_INTERFACES(UnigineEditor::Plugin)
 public:
 	artist_tool();

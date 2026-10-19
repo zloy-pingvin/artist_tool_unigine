@@ -82,63 +82,72 @@ endif()
 ##==============================================================================
 ## Target.
 ##==============================================================================
+# The sources are in src/, a folder per tool (road, path_placer, measure, ...), the
+# code they share in common/ and core/.
+set(src ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set(source_dirs core common object_placer path_placer road measure clutter)
+
 add_library(${target} SHARED
-	${CMAKE_CURRENT_SOURCE_DIR}/${target}.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/${target}.h
-	${CMAKE_CURRENT_SOURCE_DIR}/AssetLocator.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/AssetLocator.h
-	${CMAKE_CURRENT_SOURCE_DIR}/ArtistToolWindow.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/ArtistToolWindow.h
-	${CMAKE_CURRENT_SOURCE_DIR}/ClutterUnpacker.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/ClutterUnpacker.h
-	${CMAKE_CURRENT_SOURCE_DIR}/ClutterUnpackPage.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/ClutterUnpackPage.h
-	${CMAKE_CURRENT_SOURCE_DIR}/CurveEditor.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/CurveEditor.h
-	${CMAKE_CURRENT_SOURCE_DIR}/Localization.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Localization.h
-	${CMAKE_CURRENT_SOURCE_DIR}/Loupe.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Loupe.h
-	${CMAKE_CURRENT_SOURCE_DIR}/MeasurePage.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/MeasurePage.h
-	${CMAKE_CURRENT_SOURCE_DIR}/MeasureTool.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/MeasureTool.h
-	${CMAKE_CURRENT_SOURCE_DIR}/MeshBender.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/MeshBender.h
-	${CMAKE_CURRENT_SOURCE_DIR}/ObjectPlacer.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/ObjectPlacer.h
-	${CMAKE_CURRENT_SOURCE_DIR}/ObjectPlacerPage.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/ObjectPlacerPage.h
-	${CMAKE_CURRENT_SOURCE_DIR}/PathPlacer.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/PathPlacer.h
-	${CMAKE_CURRENT_SOURCE_DIR}/PathPlacerPage.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/PathPlacerPage.h
-	${CMAKE_CURRENT_SOURCE_DIR}/PlaceableAsset.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/PlaceableAsset.h
-	${CMAKE_CURRENT_SOURCE_DIR}/RoadBuilder.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/RoadBuilder.h
-	${CMAKE_CURRENT_SOURCE_DIR}/RoadBuilderPage.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/RoadBuilderPage.h
-	${CMAKE_CURRENT_SOURCE_DIR}/SurfaceFilterButton.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/SurfaceFilterButton.h
-	${CMAKE_CURRENT_SOURCE_DIR}/UiHelpers.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/UiHelpers.h
-	${CMAKE_CURRENT_SOURCE_DIR}/UndoActions.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/UndoActions.h
-	${CMAKE_CURRENT_SOURCE_DIR}/VertexSnap.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/VertexSnap.h
-	${CMAKE_CURRENT_SOURCE_DIR}/ViewportPicking.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/ViewportPicking.h
+	${src}/core/${target}.cpp
+	${src}/core/${target}.h
+	${src}/core/ArtistToolWindow.cpp
+	${src}/core/ArtistToolWindow.h
+	${src}/core/Localization.cpp
+	${src}/core/Localization.h
+	${src}/core/UiHelpers.cpp
+	${src}/core/UiHelpers.h
+	${src}/core/UndoActions.cpp
+	${src}/core/UndoActions.h
+	${src}/common/AssetLocator.cpp
+	${src}/common/AssetLocator.h
+	${src}/common/CurveEditor.cpp
+	${src}/common/CurveEditor.h
+	${src}/common/Loupe.cpp
+	${src}/common/Loupe.h
+	${src}/common/PlaceableAsset.cpp
+	${src}/common/PlaceableAsset.h
+	${src}/common/SurfaceFilterButton.cpp
+	${src}/common/SurfaceFilterButton.h
+	${src}/common/VertexSnap.cpp
+	${src}/common/VertexSnap.h
+	${src}/common/ViewportPicking.cpp
+	${src}/common/ViewportPicking.h
+	${src}/object_placer/ObjectPlacer.cpp
+	${src}/object_placer/ObjectPlacer.h
+	${src}/object_placer/ObjectPlacerPage.cpp
+	${src}/object_placer/ObjectPlacerPage.h
+	${src}/path_placer/PathPlacer.cpp
+	${src}/path_placer/PathPlacer.h
+	${src}/path_placer/PathPlacerPage.cpp
+	${src}/path_placer/PathPlacerPage.h
+	${src}/road/MeshBender.cpp
+	${src}/road/MeshBender.h
+	${src}/road/RoadBuilder.cpp
+	${src}/road/RoadBuilder.h
+	${src}/road/RoadBuilderPage.cpp
+	${src}/road/RoadBuilderPage.h
+	${src}/measure/MeasurePage.cpp
+	${src}/measure/MeasurePage.h
+	${src}/measure/MeasureTool.cpp
+	${src}/measure/MeasureTool.h
+	${src}/clutter/ClutterUnpacker.cpp
+	${src}/clutter/ClutterUnpacker.h
+	${src}/clutter/ClutterUnpackPage.cpp
+	${src}/clutter/ClutterUnpackPage.h
 	)
 
 if (ARTIST_TOOL_DEV_PAGES)
+	list(APPEND source_dirs dev)
 	target_sources(${target} PRIVATE
-		${CMAKE_CURRENT_SOURCE_DIR}/IconBrowserPage.cpp
-		${CMAKE_CURRENT_SOURCE_DIR}/IconBrowserPage.h
-		${CMAKE_CURRENT_SOURCE_DIR}/UiGalleryPage.cpp
-		${CMAKE_CURRENT_SOURCE_DIR}/UiGalleryPage.h
+		${src}/dev/IconBrowserPage.cpp
+		${src}/dev/IconBrowserPage.h
+		${src}/dev/UiGalleryPage.cpp
+		${src}/dev/UiGalleryPage.h
 		)
 endif()
+
+# Every folder is searched for includes: the files include one another by name alone.
+list(TRANSFORM source_dirs PREPEND ${src}/)
 
 if(UNIX)
 	set_target_properties(${target} PROPERTIES
@@ -152,7 +161,7 @@ set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 target_include_directories(${target} SYSTEM
 	PRIVATE
 	${UNIGINE_INCLUDE_DIR}
-	${CMAKE_CURRENT_SOURCE_DIR}
+	${source_dirs}
 	)
 
 target_link_libraries(${target}
@@ -204,7 +213,7 @@ if (UNIGINE_COMPILER_IS_MSVC)
 		/MP${proc_count}	# Build with Multiple Processes.
 		/utf-8			# Source files are UTF-8 encoded (Russian UI strings).
 		/Zi				# Debug info in all configs (store requirement: PDBs for release too).
-		/FI${CMAKE_CURRENT_SOURCE_DIR}/msvc_stdext_shim.h	# Qt 6.5.3 vs new MSVC STL (stdext removed).
+		/FI${src}/msvc_stdext_shim.h	# Qt 6.5.3 vs new MSVC STL (stdext removed).
 	)
 	unset(proc_count)
 	target_link_options(${target} PRIVATE "/DEBUG" "/INCREMENTAL:NO")
