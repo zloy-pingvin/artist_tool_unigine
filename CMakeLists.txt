@@ -85,14 +85,26 @@ endif()
 add_library(${target} SHARED
 	${CMAKE_CURRENT_SOURCE_DIR}/${target}.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/${target}.h
+	${CMAKE_CURRENT_SOURCE_DIR}/AssetLocator.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/AssetLocator.h
 	${CMAKE_CURRENT_SOURCE_DIR}/ArtistToolWindow.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/ArtistToolWindow.h
 	${CMAKE_CURRENT_SOURCE_DIR}/ClutterUnpacker.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/ClutterUnpacker.h
 	${CMAKE_CURRENT_SOURCE_DIR}/ClutterUnpackPage.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/ClutterUnpackPage.h
+	${CMAKE_CURRENT_SOURCE_DIR}/CurveEditor.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/CurveEditor.h
 	${CMAKE_CURRENT_SOURCE_DIR}/Localization.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Localization.h
+	${CMAKE_CURRENT_SOURCE_DIR}/Loupe.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Loupe.h
+	${CMAKE_CURRENT_SOURCE_DIR}/MeasurePage.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/MeasurePage.h
+	${CMAKE_CURRENT_SOURCE_DIR}/MeasureTool.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/MeasureTool.h
+	${CMAKE_CURRENT_SOURCE_DIR}/MeshBender.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/MeshBender.h
 	${CMAKE_CURRENT_SOURCE_DIR}/ObjectPlacer.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/ObjectPlacer.h
 	${CMAKE_CURRENT_SOURCE_DIR}/ObjectPlacerPage.cpp
@@ -103,8 +115,18 @@ add_library(${target} SHARED
 	${CMAKE_CURRENT_SOURCE_DIR}/PathPlacerPage.h
 	${CMAKE_CURRENT_SOURCE_DIR}/PlaceableAsset.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/PlaceableAsset.h
+	${CMAKE_CURRENT_SOURCE_DIR}/RoadBuilder.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/RoadBuilder.h
+	${CMAKE_CURRENT_SOURCE_DIR}/RoadBuilderPage.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/RoadBuilderPage.h
+	${CMAKE_CURRENT_SOURCE_DIR}/SurfaceFilterButton.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/SurfaceFilterButton.h
 	${CMAKE_CURRENT_SOURCE_DIR}/UiHelpers.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/UiHelpers.h
+	${CMAKE_CURRENT_SOURCE_DIR}/UndoActions.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/UndoActions.h
+	${CMAKE_CURRENT_SOURCE_DIR}/VertexSnap.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/VertexSnap.h
 	${CMAKE_CURRENT_SOURCE_DIR}/ViewportPicking.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/ViewportPicking.h
 	)

@@ -4,16 +4,24 @@
 
 #include <QAbstractSpinBox>
 #include <QButtonGroup>
+#include <QCryptographicHash>
+#include <QDial>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QFileInfo>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QPainter>
 #include <QPixmap>
+#include <QSettings>
+#include <QStringList>
 #include <QToolButton>
 #include <QWidget>
+
+#include <cmath>
 
 namespace ArtistTool
 {
@@ -111,6 +119,96 @@ private:
 
 } // namespace
 
+namespace
+{
+
+// A dial with longer marks at the main angles.
+class AngleDial final : public QDial
+{
+public:
+	explicit AngleDial(int major_step)
+		: major_step_(major_step)
+	{
+	}
+
+protected:
+	void paintEvent(QPaintEvent *event) override
+	{
+		QDial::paintEvent(event);
+		if (major_step_ <= 0 || maximum() <= minimum())
+			return;
+
+		QPainter painter(this);
+		painter.setRenderHint(QPainter::Antialiasing);
+		painter.setPen(QPen(iconColor(), 1.0));
+
+		const qreal pi = 3.14159265358979323846;
+		const qreal radius = qMin(width(), height()) / 2.0;
+		const QPointF center(width() / 2.0, height() / 2.0);
+		const qreal range = qreal(maximum() - minimum());
+		for (int value = minimum(); value <= maximum(); ++value)
+		{
+			if (value % major_step_ != 0)
+				continue;
+			// Where QDial puts the value: a whole circle with the minimum at the bottom
+			// when it wraps, else 300 degrees with the gap at the bottom.
+			const qreal along = qreal(value - minimum()) / range;
+			const qreal angle = wrapping() ? pi * 1.5 - along * 2.0 * pi : (pi * 8.0 - along * 10.0 * pi) / 6.0;
+			const QPointF direction(std::cos(angle), -std::sin(angle));
+			painter.drawLine(center + direction * (radius - 8.0), center + direction * (radius - 1.0));
+		}
+	}
+
+	// One degree per step of the wheel (QDial takes several), round the circle when
+	// the dial wraps.
+	void wheelEvent(QWheelEvent *event) override
+	{
+		wheel_delta_ += event->angleDelta().y();
+		const int steps = wheel_delta_ / 120;
+		wheel_delta_ -= steps * 120;
+		if (steps != 0)
+		{
+			int value = this->value() + steps * singleStep();
+			const int range = maximum() - minimum();
+			if (wrapping() && range > 0)
+			{
+				while (value > maximum())
+					value -= range;
+				while (value < minimum())
+					value += range;
+			}
+			setValue(qBound(minimum(), value, maximum()));
+		}
+		event->accept();
+	}
+
+private:
+	int major_step_{45};
+	int wheel_delta_{0};
+};
+
+} // namespace
+
+QDial *makeAngleDial(int minimum, int maximum, int major_step, int snap)
+{
+	QDial *dial = new AngleDial(major_step);
+	dial->setRange(minimum, maximum);
+	dial->setSingleStep(1);
+	dial->setPageStep(15);
+	dial->setNotchesVisible(true);
+	dial->setNotchTarget(12.0);
+
+	// Turned with the mouse, it sticks to the main angles.
+	QObject::connect(dial, &QDial::valueChanged, dial, [dial, major_step, snap](int value) {
+		if (!dial->isSliderDown() || major_step <= 0)
+			return;
+		const int nearest = int(std::lround(double(value) / major_step)) * major_step;
+		if (nearest != value && std::abs(nearest - value) <= snap && nearest >= dial->minimum() && nearest <= dial->maximum())
+			dial->setValue(nearest);
+	});
+	return dial;
+}
+
 void enableSpinBoxDrag(QAbstractSpinBox *box)
 {
 	box->installEventFilter(new SpinBoxDrag(box));
@@ -158,6 +256,71 @@ QIcon makeFilterIcon()
 	const QPointF points[] = {QPointF(3, 5), QPointF(29, 5), QPointF(19, 17), QPointF(19, 28),
 		QPointF(13, 24), QPointF(13, 17)};
 	painter.drawPolygon(points, 6);
+	return QIcon(pixmap);
+}
+
+QIcon makeRulerIcon()
+{
+	QPixmap pixmap(32, 32);
+	pixmap.fill(Qt::transparent);
+
+	QPainter painter(&pixmap);
+	painter.setRenderHint(QPainter::Antialiasing);
+
+	// A ruler lying from the bottom left to the top right, with ticks along its upper
+	// edge, every other one longer.
+	painter.translate(16, 16);
+	painter.rotate(-45);
+	painter.setPen(QPen(iconColor(), 2.4));
+	painter.setBrush(Qt::NoBrush);
+	painter.drawRoundedRect(QRectF(-15, -5.5, 30, 11), 1.5, 1.5);
+	painter.setPen(QPen(iconColor(), 2.0, Qt::SolidLine, Qt::FlatCap));
+	for (int i = 0; i < 5; ++i)
+	{
+		const qreal x = -10 + i * 5;
+		painter.drawLine(QPointF(x, -5.5), QPointF(x, i % 2 ? -1.5 : 0.5));
+	}
+	return QIcon(pixmap);
+}
+
+QIcon makeAngleIcon()
+{
+	QPixmap pixmap(32, 32);
+	pixmap.fill(Qt::transparent);
+
+	QPainter painter(&pixmap);
+	painter.setRenderHint(QPainter::Antialiasing);
+
+	// Two sides from the corner at the bottom left: one along the bottom, one up to
+	// the right, and an arc between them.
+	painter.setPen(QPen(iconColor(), 2.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+	painter.setBrush(Qt::NoBrush);
+	const QPointF lines[] = {QPointF(29, 27), QPointF(4, 27), QPointF(22, 5)};
+	painter.drawPolyline(lines, 3);
+	painter.setPen(QPen(iconColor(), 2.0, Qt::SolidLine, Qt::FlatCap));
+	painter.drawArc(QRectF(4 - 13, 27 - 13, 26, 26), 0, 51 * 16);
+	return QIcon(pixmap);
+}
+
+QIcon makeFigureIcon()
+{
+	QPixmap pixmap(32, 32);
+	pixmap.fill(Qt::transparent);
+
+	QPainter painter(&pixmap);
+	painter.setRenderHint(QPainter::Antialiasing);
+	painter.setPen(Qt::NoPen);
+	painter.setBrush(iconColor());
+
+	// A head, and the body with the arms and the legs as one shape.
+	painter.drawEllipse(QRectF(12.5, 1, 7, 7));
+	const QPointF body[] = {
+		QPointF(10, 9.5), QPointF(22, 9.5), QPointF(24.5, 12), QPointF(25, 20), QPointF(22.5, 20),
+		QPointF(22, 14), QPointF(21, 14), QPointF(20.5, 31), QPointF(17, 31), QPointF(16, 21),
+		QPointF(15, 31), QPointF(11.5, 31), QPointF(11, 14), QPointF(10, 14), QPointF(9.5, 20),
+		QPointF(7, 20), QPointF(7.5, 12),
+	};
+	painter.drawPolygon(body, int(sizeof(body) / sizeof(body[0])));
 	return QIcon(pixmap);
 }
 
@@ -223,6 +386,17 @@ QString toggleButtonStyle(const QString &color, const QString &off_text_color, i
 		"QToolButton:checked { color: #1c1c1c; background-color: %1; border-color: %1; }"
 		"QToolButton:disabled { color: #7a7a7a; }")
 		.arg(color, off_text_color).arg(min_width);
+}
+
+QString choiceButtonStyle()
+{
+	return QString::fromUtf8(
+		"QToolButton { color: #e4e4e4; font-weight: bold; background-color: #3b3e43;"
+		" border: 1px solid #5a5d63; border-radius: 3px; padding: 3px 6px; min-width: 64px; }"
+		"QToolButton:hover { background-color: #4b4e54; }"
+		"QToolButton:pressed { background-color: #2f3236; }"
+		"QToolButton:checked { color: white; background-color: #2f6fd6; border-color: #2f6fd6; }"
+		"QToolButton:disabled { color: #7a7a7a; }");
 }
 
 QString primaryButtonStyle()
@@ -304,6 +478,52 @@ QToolButton *makeSectionHeader(const QString &title, QWidget *body)
 		body->setVisible(expanded);
 	});
 	return header;
+}
+
+namespace
+{
+
+// "projects/<name>_<hash>": the name of the project folder for reading, and a hash of
+// the whole path, so that two projects of the same name do not share it.
+QString project_group()
+{
+	const QString data = QDir::cleanPath(QDir::fromNativeSeparators(QString::fromUtf8(Unigine::Engine::get()->getDataPath()))).toLower();
+	QString name = QDir(data).dirName() == QLatin1String("data") ? QFileInfo(data).dir().dirName() : QDir(data).dirName();
+	for (QChar &c : name)
+	{
+		if (!c.isLetterOrNumber() || c.unicode() >= 128)
+			c = QLatin1Char('_');
+	}
+	const QString hash = QString::fromLatin1(QCryptographicHash::hash(data.toUtf8(), QCryptographicHash::Md5).toHex().left(8));
+	return QString::fromUtf8("projects/") + name + QLatin1Char('_') + hash;
+}
+
+} // namespace
+
+void removeProjectSettings(QSettings &settings, const char *tool_group, const QStringList &global_keys)
+{
+	settings.beginGroup(QString::fromUtf8(tool_group));
+	for (const QString &key : global_keys)
+		settings.remove(key);
+	settings.remove(project_group());
+	settings.endGroup();
+}
+
+void beginProjectGroup(QSettings &settings, const char *tool_group, const QStringList &global_keys)
+{
+	const QString group = project_group();
+
+	settings.beginGroup(QString::fromUtf8(tool_group));
+	for (const QString &key : settings.childKeys())
+	{
+		if (global_keys.contains(key))
+			continue;
+		const QString moved = group + QLatin1Char('/') + key;
+		if (!settings.contains(moved))
+			settings.setValue(moved, settings.value(key));
+		settings.remove(key);
+	}
+	settings.beginGroup(group);
 }
 
 } // namespace ArtistTool

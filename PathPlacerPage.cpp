@@ -1,10 +1,13 @@
 #include "PathPlacerPage.h"
+#include "SurfaceFilterButton.h"
 #include "UiHelpers.h"
 
 #include <editor/UnigineSelection.h>
+#include <editor/UnigineSelector.h>
 
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFileInfo>
@@ -202,7 +205,7 @@ void PathPlacerPage::build_ui()
 	layout->addWidget(status_label_);
 
 	// Hotkeys: a collapsible list at the bottom, like in the paint tools of the editor.
-	QLabel *hotkeys = new QLabel(uiText(
+	QLabel *hotkeys = new QLabel(loc_.hotkeys(
 		"LMB On A Point - Select It\n"
 		"Ctrl / Shift + LMB On A Point - Add It To The Selection\n"
 		"LMB (Hold) On A Point + Mouse Move - Move It Over Surfaces\n"
@@ -216,8 +219,8 @@ void PathPlacerPage::build_ui()
 		"ЛКМ по точке - выделить её\n"
 		"Ctrl / Shift + ЛКМ по точке - добавить её к выделению\n"
 		"ЛКМ (держать) по точке + движение мыши - двигать её по поверхностям\n"
-		"ЛКМ по поверхности - добавить точку в конец кривой (пока включено «Добавить точки»)\n"
-		"Ctrl + ЛКМ по поверхности - добавить в конец угловую точку (пока включено «Добавить точки»)\n"
+		"ЛКМ по поверхности - добавить точку в конец кривой (пока включено «[[Add Points|Добавить точки]]»)\n"
+		"Ctrl + ЛКМ по поверхности - добавить в конец угловую точку (пока включено «[[Add Points|Добавить точки]]»)\n"
 		"ЛКМ (держать) + движение мыши - двигать добавленную точку по поверхностям\n"
 		"Alt + ЛКМ - камера редактора (инструмент её не перехватывает)\n"
 		"Esc - закончить добавление точек (новая кривая без точек удаляется)\n"
@@ -237,7 +240,7 @@ void PathPlacerPage::build_ui()
 		"Выделенную точку можно двигать и гизмо редактора: берите его стрелки чуть в "
 		"стороне от точки."));
 
-	hotkeys_header_ = makeSectionHeader(uiText("Hotkeys", "Горячие клавиши"), hotkeys);
+	hotkeys_header_ = makeSectionHeader(loc_.hotkeys("Hotkeys", "Горячие клавиши"), hotkeys);
 	hotkeys_header_->setToolTip(loc_.tip(
 		"Keys and mouse actions of the tool.",
 		"Клавиши и действия мышью для этого инструмента."));
@@ -286,14 +289,18 @@ QWidget *PathPlacerPage::build_path_group()
 		"green in the viewport), whatever is selected. To put a point between two "
 		"others, use Subdivide.\n"
 		"Ctrl + click adds a corner point right away.\n"
-		"Points are ordinary nodes: delete them with Delete.",
+		"Points are ordinary nodes: delete them with Delete.\n"
+		"The manipulator of the editor is hidden meanwhile, so that a click does not miss "
+		"it: drag the points with the mouse.",
 		"Пока включено, каждый клик левой кнопкой по поверхности во вьюпорте добавляет "
 		"точку; не отпуская кнопку, её можно тащить по поверхностям. Esc выключает.\n"
 		"Точка всегда встаёт в конец кривой, после последней (во вьюпорте она зелёная), "
 		"что бы ни было выделено. Чтобы поставить точку между двумя другими - "
 		"кнопка [[Subdivide|«Разделить»]].\n"
 		"Ctrl + клик сразу ставит угловую точку ([[Corner|«Угол»]]).\n"
-		"Точки - обычные ноды: удаляйте их клавишей Delete."));
+		"Точки - обычные ноды: удаляйте их клавишей Delete.\n"
+		"Гизмо редактора на это время прячется, чтобы клик мимо него не ставил точку: "
+		"точки двигайте мышью."));
 	buttons->addWidget(add_points_button_, 1);
 	layout->addLayout(buttons);
 
@@ -368,7 +375,11 @@ QWidget *PathPlacerPage::build_path_group()
 	}
 	for (QToolButton *button : {smooth_button_, corner_button_, subdivide_button_})
 		button->setFixedSize(point_button_size);
-	layout->addLayout(point_row);
+	// The row of the selected points, in a frame of its own, as on the Road page.
+	QGroupBox *point_box = new QGroupBox(uiText("Point", "Точка"));
+	QVBoxLayout *point_layout = new QVBoxLayout(point_box);
+	point_layout->addLayout(point_row);
+	layout->addWidget(point_box);
 
 	QHBoxLayout *closed_row = new QHBoxLayout;
 	closed_ = new QCheckBox(uiText("Closed Loop", "Замкнутая"));
@@ -383,6 +394,9 @@ QWidget *PathPlacerPage::build_path_group()
 	closed_row->addWidget(makeResetButton(loc_.tip("Reset to default", "Сбросить на значение по умолчанию"),
 		this, [this]() { closed_->setChecked(PathSettings().closed); }));
 	layout->addLayout(closed_row);
+
+	// How the objects lie on the ground, in a frame of its own under Closed Loop.
+	layout->addWidget(build_ground_block());
 
 	// The paths of the world: a click switches to the path, so it does not have to be
 	// looked for in the World Hierarchy.
@@ -409,6 +423,44 @@ QWidget *PathPlacerPage::build_path_group()
 	rescan_button->setToolTip(loc_.tip("Look through the world for paths again.", "Заново найти кривые в мире."));
 	connect(rescan_button, &QToolButton::clicked, this, [this]() { rescan_paths(); });
 	paths_header->addWidget(rescan_button);
+
+	// What can be done with the current path, as small buttons after Find Paths.
+	const auto make_path_button = [&](const char *icon, const QString &tooltip) {
+		QToolButton *button = new QToolButton;
+		button->setIcon(editor_icon(icon));
+		button->setIconSize(BUTTON_ICON_SIZE);
+		button->setFocusPolicy(Qt::NoFocus);
+		button->setStyleSheet(point_button_style + QString::fromUtf8("QToolButton:pressed { background-color: #5c6066; }"));
+		button->setToolTip(tooltip);
+		paths_header->addWidget(button);
+		return button;
+	};
+	clone_path_button_ = make_path_button(":/images/icon_clone.png", loc_.tip(
+		"Clone the current path: a new path with the same points, settings and pattern, no "
+		"objects yet - press Fill Path for them.",
+		"Клонировать текущую кривую: новая кривая с теми же точками, настройками и паттерном, "
+		"объектов пока нет - для них нажмите [[Fill Path|«Заполнить кривую»]]."));
+	remove_curve_button_ = make_path_button(":/images/icon_delete_cross.png", loc_.tip(
+		"Remove the curve of the current path and keep its objects: they stay as ordinary "
+		"nodes, in a node of the name of the path. The path can not be edited any more. "
+		"Ctrl+Z brings it back.",
+		"Удалить кривую текущей кривой, оставив объекты: они остаются обычными нодами в ноде "
+		"с именем кривой. Править кривую больше нельзя. Ctrl+Z вернёт её."));
+	remove_path_button_ = make_path_button(":/images/icon_delete_trash.png", loc_.tip(
+		"Remove the current path completely, with its objects. Ctrl+Z brings it back.",
+		"Удалить текущую кривую полностью, вместе с объектами. Ctrl+Z вернёт её."));
+	connect(clone_path_button_, &QToolButton::clicked, this, [this]() {
+		message_.clear();
+		placer_->clonePath();
+	});
+	connect(remove_curve_button_, &QToolButton::clicked, this, [this]() {
+		message_.clear();
+		placer_->removePathCurve();
+	});
+	connect(remove_path_button_, &QToolButton::clicked, this, [this]() {
+		message_.clear();
+		placer_->removePath();
+	});
 	layout->addLayout(paths_header);
 
 	paths_list_ = new QListWidget;
@@ -423,6 +475,57 @@ QWidget *PathPlacerPage::build_path_group()
 		"QListWidget::item { padding: 1px 4px; }"
 		"QListWidget::item:selected { background-color: #2f6fd6; color: white; }"));
 	layout->addWidget(paths_list_);
+
+	// Where the new paths go, as the Parent of the Object Placer.
+	const QString parent_tooltip = loc_.tip(
+		"New paths (New Path, Clone) become children of this node. World root - they are added "
+		"to the end of the World Hierarchy; a clone then goes next to its path.",
+		"Новые кривые («Новая кривая», клон) становятся детьми этой ноды. [[World root|Корень мира]] - "
+		"добавляются в конец World Hierarchy; клон тогда кладётся рядом со своей кривой.");
+	QHBoxLayout *parent_row = new QHBoxLayout;
+	parent_row->setSpacing(3);
+	QLabel *parent_title = new QLabel(uiText("Parent", "Родитель"));
+	parent_title->setToolTip(parent_tooltip);
+	parent_row->addWidget(parent_title);
+	parent_row->addSpacing(6);
+	parent_label_ = new QLabel;
+	parent_label_->setToolTip(parent_tooltip);
+	parent_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+	parent_row->addWidget(parent_label_, 1);
+	const auto make_parent_button = [&](const QString &text, const char *icon, const QString &tooltip) {
+		QToolButton *button = new QToolButton;
+		button->setText(text);
+		button->setIcon(editor_icon(icon));
+		button->setIconSize(BUTTON_ICON_SIZE);
+		button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+		button->setFocusPolicy(Qt::NoFocus);
+		button->setToolTip(tooltip);
+		button->setStyleSheet(choiceButtonStyle());
+		parent_row->addWidget(button);
+		return button;
+	};
+	QToolButton *parent_select = make_parent_button(uiText("Use selected", "Взять выделенную"), ":/images/icon_stack.png",
+		loc_.tip("Make the node selected in the World Hierarchy the parent of the new paths.",
+			"Сделать ноду, выделенную в World Hierarchy, родителем новых кривых."));
+	parent_clear_button_ = make_parent_button(uiText("Clear", "Сбросить"), ":/images/icon_delete_trash.png",
+		loc_.tip("Put the new paths into the world root again.", "Снова класть новые кривые в корень мира."));
+	layout->addLayout(parent_row);
+	connect(parent_select, &QToolButton::clicked, this, [this]() {
+		const ::UnigineEditor::SelectorNodes *selector = Selection::getSelectorNodes();
+		if (!selector || selector->empty())
+		{
+			message_ = uiText("Select a node in the World Hierarchy to use it as the parent.",
+				"Выделите ноду в World Hierarchy, чтобы сделать её родителем.");
+			refresh();
+			return;
+		}
+		message_.clear();
+		placer_->setParentNode(selector->getNodes()[0]);
+	});
+	connect(parent_clear_button_, &QToolButton::clicked, this, [this]() {
+		message_.clear();
+		placer_->setParentNode(Unigine::NodePtr());
+	});
 
 	connect(paths_list_, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
 		message_.clear();
@@ -455,8 +558,8 @@ QWidget *PathPlacerPage::build_path_group()
 		// closed one would join its ends as soon as it gets its third point.
 		PathSettings settings = read_settings();
 		settings.closed = false;
-		placer_->setSettings(settings);
 		placer_->createPath();
+		placer_->setSettings(settings);
 		placer_->setAddingPoints(true);
 	});
 	connect(add_points_button_, &QPushButton::toggled, this, [this](bool checked) {
@@ -473,6 +576,106 @@ QWidget *PathPlacerPage::build_path_group()
 	connect(old_script_button, &QPushButton::clicked, this, [this]() { placer_->removeOldScript(); });
 
 	return group;
+}
+
+QWidget *PathPlacerPage::build_ground_block()
+{
+	const PathSettings defaults;
+	const QString reset_tooltip = loc_.tip("Reset to default", "Сбросить на значение по умолчанию");
+
+	QGroupBox *block = new QGroupBox(uiText("Ground", "Земля"));
+	QGridLayout *layout = new QGridLayout(block);
+	layout->setColumnStretch(1, 1);
+	int row = 0;
+
+	snap_to_ground_ = new QCheckBox(uiText("Snap To Ground", "Прижать к земле"));
+	snap_to_ground_->setToolTip(loc_.tip(
+		"On: every object is dropped onto the surface under the path (searched 5 units "
+		"above the path and 100 below), of the kinds checked in Lay On.\n"
+		"Off: objects stand exactly on the curve.",
+		"Вкл: каждый объект ставится на поверхность под кривой (ищется на 5 юнитов выше "
+		"кривой и на 100 ниже) - из тех, что отмечены в [[Lay On|«Класть на»]].\n"
+		"Выкл: объекты стоят точно на кривой."));
+	QHBoxLayout *snap_row = new QHBoxLayout;
+	snap_row->setSpacing(6);
+	snap_row->addWidget(snap_to_ground_);
+
+	// Shown only while Snap To Ground is on, see refresh().
+	const QString ground_offset_tooltip = loc_.tip(
+		"How far above the surface the objects are put, in units - like the offset of "
+		"the editor's Snap to Surface. Negative sinks them into the surface.\n"
+		"It goes straight up, not along the slope, so the objects stay under the curve "
+		"and the sections of a fence stay joined.",
+		"На сколько объекты приподняты над поверхностью, в юнитах, - как отступ у Snap to "
+		"Surface в редакторе. Минус утапливает их в поверхность.\n"
+		"Идёт строго вверх, а не по наклону, поэтому объекты остаются под кривой, а "
+		"секции забора - состыкованными.");
+	ground_offset_label_ = new QLabel(uiText("Offset From Surface", "Отступ от поверхности"));
+	ground_offset_label_->setToolTip(ground_offset_tooltip);
+	ground_offset_label_->setContentsMargins(8, 0, 0, 0);
+	snap_row->addWidget(ground_offset_label_);
+	ground_offset_ = make_spin_box(-100000.0, 100000.0, 0.1, 3, ground_offset_tooltip);
+	snap_row->addWidget(ground_offset_, 1);
+	ground_offset_reset_ = makeResetButton(reset_tooltip, this, [this, defaults]() {
+		ground_offset_->setValue(defaults.ground_offset);
+	});
+	snap_row->addWidget(ground_offset_reset_);
+	snap_row->addStretch(1);
+
+	// The ground is not watched: after it has changed, the objects are put on it anew.
+	refresh_ground_ = new QPushButton(uiText("Recompute", "Пересчитать"));
+	refresh_ground_->setIcon(editor_icon(":/images/tools/icon_drop_to_ground.png"));
+	refresh_ground_->setIconSize(BUTTON_ICON_SIZE);
+	refresh_ground_->setFocusPolicy(Qt::NoFocus);
+	refresh_ground_->setToolTip(loc_.tip(
+		"Put the objects on the ground anew: after the ground itself has changed (the "
+		"terrain was sculpted, objects were moved) - the path does not notice that by "
+		"itself.",
+		"Заново поставить объекты на землю: после того как изменилась сама земля "
+		"(подправили террейн, сдвинули объекты) - кривая этого сама не замечает."));
+	snap_row->addWidget(refresh_ground_);
+	layout->addLayout(snap_row, row, 0, 1, 2);
+	layout->addWidget(makeResetButton(reset_tooltip, this, [this, defaults]() {
+		snap_to_ground_->setChecked(defaults.snap_to_ground);
+	}), row, 2);
+	++row;
+	connect(refresh_ground_, &QPushButton::clicked, this, [this]() {
+		message_.clear();
+		placer_->rearrange();
+		refresh();
+	});
+
+	// The same filter as on the Road page: what it leaves out is looked through.
+	SurfaceFilterButton::Texts filter_texts;
+	filter_texts.tooltip = loc_.tip(
+		"What the objects and the points of the path are put on. The unchecked kinds of "
+		"objects are looked through: e.g. with only Terrain checked a fence stands on the "
+		"terrain under the rocks, and a click on a rock puts a point onto the terrain "
+		"under it.",
+		"На что ставятся объекты и точки кривой. Неотмеченные типы объектов пропускаются "
+		"насквозь: например, если отмечен только Terrain, забор встаёт на террейн под "
+		"камнями, а клик по камню ставит точку на террейн под ним.");
+	filter_texts.only_immovable = uiText("Only On Immovable Nodes", "Только на ноды с флагом Immovable");
+	filter_texts.only_immovable_tooltip = loc_.tip(
+		"Put the objects only on nodes that have the Immovable flag enabled.",
+		"Ставить объекты только на ноды с включённым флагом Immovable.");
+	filter_texts.only_intersection = uiText("Only On Surfaces With Intersection", "Только на поверхности с Intersection");
+	filter_texts.only_intersection_tooltip = loc_.tip(
+		"Put the objects only on surfaces that have the Intersection flag and any bit of the "
+		"Intersection Mask enabled.",
+		"Ставить объекты только на поверхности с включённым флагом Intersection и хотя бы "
+		"одним битом Intersection Mask.");
+	filter_texts.reset_tooltip = reset_tooltip;
+	ground_filter_ = new SurfaceFilterButton(filter_texts);
+	QLabel *filter_label = new QLabel(uiText("Lay On", "Класть на"));
+	filter_label->setToolTip(filter_texts.tooltip);
+	layout->addWidget(filter_label, row, 0);
+	layout->addWidget(ground_filter_, row, 1, 1, 2);
+	++row;
+	ground_filter_->on_changed = [this]() { apply_settings(); };
+
+	connect(snap_to_ground_, &QCheckBox::toggled, this, [this](bool) { apply_settings(); });
+	return block;
 }
 
 QWidget *PathPlacerPage::build_objects_group()
@@ -569,41 +772,6 @@ QWidget *PathPlacerPage::build_objects_group()
 	}), row, 2);
 	++row;
 
-	snap_to_ground_ = new QCheckBox(uiText("Snap To Ground", "Прижать к земле"));
-	snap_to_ground_->setToolTip(loc_.tip(
-		"On: every object is dropped onto the surface under the path (searched 5 units "
-		"above the path and 100 below).\n"
-		"Off: objects stand exactly on the curve.",
-		"Вкл: каждый объект ставится на поверхность под кривой (ищется на 5 юнитов выше "
-		"кривой и на 100 ниже).\n"
-		"Выкл: объекты стоят точно на кривой."));
-	layout->addWidget(snap_to_ground_, row, 0, 1, 2);
-	layout->addWidget(makeResetButton(reset_tooltip, this, [this, defaults]() {
-		snap_to_ground_->setChecked(defaults.snap_to_ground);
-	}), row, 2);
-	++row;
-
-	// Shown only while Snap To Ground is on, see refresh().
-	const QString ground_offset_tooltip = loc_.tip(
-		"How far above the surface the objects are put, in units - like the offset of "
-		"the editor's Snap to Surface. Negative sinks them into the surface.\n"
-		"It goes straight up, not along the slope, so the objects stay under the curve "
-		"and the sections of a fence stay joined.",
-		"На сколько объекты приподняты над поверхностью, в юнитах, - как отступ у Snap to "
-		"Surface в редакторе. Минус утапливает их в поверхность.\n"
-		"Идёт строго вверх, а не по наклону, поэтому объекты остаются под кривой, а "
-		"секции забора - состыкованными.");
-	ground_offset_label_ = new QLabel(uiText("Offset From Surface", "Отступ от поверхности"));
-	ground_offset_label_->setToolTip(ground_offset_tooltip);
-	layout->addWidget(ground_offset_label_, row, 0);
-	ground_offset_ = make_spin_box(-100000.0, 100000.0, 0.1, 3, ground_offset_tooltip);
-	layout->addWidget(ground_offset_, row, 1);
-	ground_offset_reset_ = makeResetButton(reset_tooltip, this, [this, defaults]() {
-		ground_offset_->setValue(defaults.ground_offset);
-	});
-	layout->addWidget(ground_offset_reset_, row, 2);
-	++row;
-
 	QHBoxLayout *update_row = new QHBoxLayout;
 	live_update_ = new QCheckBox(uiText("Live Update", "Автообновление"));
 	live_update_->setChecked(true);
@@ -629,7 +797,7 @@ QWidget *PathPlacerPage::build_objects_group()
 
 	connect(forward_axis_, &QButtonGroup::idClicked, this, [this](int) { apply_settings(); });
 	connect(up_axis_, &QButtonGroup::idClicked, this, [this](int) { apply_up_axis(); });
-	for (QCheckBox *check : {yaw_only_, skew_, snap_to_ground_})
+	for (QCheckBox *check : {yaw_only_, skew_})
 		connect(check, &QCheckBox::toggled, this, [this](bool) { apply_settings(); });
 	connect(live_update_, &QCheckBox::toggled, this, [this](bool checked) { placer_->setLiveUpdate(checked); });
 	connect(rearrange_button_, &QPushButton::clicked, this, [this]() {
@@ -731,8 +899,10 @@ void PathPlacerPage::load_settings()
 
 	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
 	settings.beginGroup(SETTINGS_GROUP);
-
-	// What a new path starts with: the settings used last.
+	hotkeys_header_->setChecked(settings.value("hotkeys_expanded", true).toBool());
+	settings.endGroup();
+	// What a new path starts with: the settings used last in this project.
+	beginProjectGroup(settings, SETTINGS_GROUP, {QString::fromUtf8("hotkeys_expanded")});
 	PathSettings last;
 	last.step = float(settings.value("step", double(defaults.step)).toDouble());
 	last.forward_axis = AxisDirection(settings.value("forward_axis", int(defaults.forward_axis)).toInt());
@@ -741,9 +911,10 @@ void PathPlacerPage::load_settings()
 	last.skew = settings.value("skew", defaults.skew).toBool();
 	last.snap_to_ground = settings.value("snap_to_ground", defaults.snap_to_ground).toBool();
 	last.ground_offset = float(settings.value("ground_offset", double(defaults.ground_offset)).toDouble());
+	last.ground.surface_types = settings.value("ground_types", defaults.ground.surface_types).toInt();
+	last.ground.only_immovable = settings.value("ground_immovable", defaults.ground.only_immovable).toBool();
+	last.ground.only_intersection = settings.value("ground_intersection", defaults.ground.only_intersection).toBool();
 	placer_->setSettings(last);
-
-	hotkeys_header_->setChecked(settings.value("hotkeys_expanded", true).toBool());
 
 	connect(step_, &QDoubleSpinBox::valueChanged, this, [this](double) { apply_settings(); });
 	connect(ground_offset_, &QDoubleSpinBox::valueChanged, this, [this](double) { apply_settings(); });
@@ -751,12 +922,16 @@ void PathPlacerPage::load_settings()
 
 void PathPlacerPage::resetSettings()
 {
+	// The settings of this project only: the other projects keep theirs.
 	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
-	settings.remove(QString::fromUtf8(SETTINGS_GROUP));
+	removeProjectSettings(settings, SETTINGS_GROUP, {QString::fromUtf8("hotkeys_expanded")});
 
 	hotkeys_header_->setChecked(true);
 	if (!placer_->hasPath())
 		placer_->setSettings(PathSettings());
+	// The settings of the current path are its own: they are not remembered for the new
+	// paths until one of them is changed.
+	settings_reset_ = true;
 }
 
 void PathPlacerPage::save_settings() const
@@ -765,6 +940,11 @@ void PathPlacerPage::save_settings() const
 
 	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
 	settings.beginGroup(SETTINGS_GROUP);
+	settings.setValue("hotkeys_expanded", hotkeys_header_->isChecked());
+	settings.endGroup();
+	if (settings_reset_)
+		return;
+	beginProjectGroup(settings, SETTINGS_GROUP, {QString::fromUtf8("hotkeys_expanded")});
 	settings.setValue("step", double(last.step));
 	settings.setValue("forward_axis", int(last.forward_axis));
 	settings.setValue("up_axis", int(last.up_axis));
@@ -772,7 +952,9 @@ void PathPlacerPage::save_settings() const
 	settings.setValue("skew", last.skew);
 	settings.setValue("snap_to_ground", last.snap_to_ground);
 	settings.setValue("ground_offset", double(last.ground_offset));
-	settings.setValue("hotkeys_expanded", hotkeys_header_->isChecked());
+	settings.setValue("ground_types", last.ground.surface_types);
+	settings.setValue("ground_immovable", last.ground.only_immovable);
+	settings.setValue("ground_intersection", last.ground.only_intersection);
 }
 
 PathSettings PathPlacerPage::read_settings() const
@@ -792,6 +974,7 @@ PathSettings PathPlacerPage::read_settings() const
 	settings.skew = skew_->isChecked();
 	settings.snap_to_ground = snap_to_ground_->isChecked();
 	settings.ground_offset = field_value(ground_offset_, current.ground_offset);
+	settings.ground = ground_filter_->getFilter();
 	return settings;
 }
 
@@ -799,6 +982,7 @@ void PathPlacerPage::apply_up_axis()
 {
 	if (updating_)
 		return;
+	settings_reset_ = false;
 
 	// The two axes can not be the same one. The tool settles that by changing the up
 	// axis, which would undo this very pick; so the forward axis takes the axis the
@@ -811,8 +995,10 @@ void PathPlacerPage::apply_up_axis()
 
 void PathPlacerPage::apply_settings()
 {
-	if (!updating_)
-		placer_->setSettings(read_settings());
+	if (updating_)
+		return;
+	settings_reset_ = false;
+	placer_->setSettings(read_settings());
 }
 
 void PathPlacerPage::refresh()
@@ -835,6 +1021,8 @@ void PathPlacerPage::refresh()
 	for (QWidget *widget : {static_cast<QWidget *>(ground_offset_label_), static_cast<QWidget *>(ground_offset_),
 			static_cast<QWidget *>(ground_offset_reset_)})
 		widget->setVisible(settings.snap_to_ground);
+	refresh_ground_->setEnabled(has_path && settings.snap_to_ground);
+	ground_filter_->setFilter(settings.ground);
 	live_update_->setChecked(placer_->isLiveUpdate());
 	add_points_button_->setChecked(placer_->isAddingPoints());
 	updating_ = false;
@@ -854,6 +1042,12 @@ void PathPlacerPage::refresh()
 	// New Path is green while there is no path to work with - it is the thing to
 	// press then; with a path it is an ordinary gray button.
 	set_style(new_path_button_, has_path ? QString() : goButtonStyle());
+	clone_path_button_->setEnabled(has_path);
+	remove_curve_button_->setEnabled(has_path);
+	remove_path_button_->setEnabled(has_path);
+	const Unigine::NodePtr parent = placer_->getParentNode();
+	parent_label_->setText(parent ? QString::fromUtf8(parent->getName()) : uiText("World root", "Корень мира"));
+	parent_clear_button_->setEnabled(bool(parent));
 	// Rearrange Now is blue while Live Update is off: the objects are not put back
 	// on the path by themselves then, the button is the way to do it.
 	set_style(rearrange_button_, placer_->isLiveUpdate() ? QString() : attentionButtonStyle());
@@ -862,11 +1056,11 @@ void PathPlacerPage::refresh()
 		: uiText("Add Points", "Добавить точки"));
 	add_points_button_->setEnabled(has_path);
 
-	const PathPlacer::PointsState points = placer_->getSelectedPointsState();
-	smooth_button_->setEnabled(points != PathPlacer::POINTS_NONE);
-	corner_button_->setEnabled(points != PathPlacer::POINTS_NONE);
-	smooth_button_->setChecked(points == PathPlacer::POINTS_SMOOTH);
-	corner_button_->setChecked(points == PathPlacer::POINTS_CORNER);
+	const CurvePointsState points = placer_->getSelectedPointsState();
+	smooth_button_->setEnabled(points != POINTS_NONE);
+	corner_button_->setEnabled(points != POINTS_NONE);
+	smooth_button_->setChecked(points == POINTS_SMOOTH);
+	corner_button_->setChecked(points == POINTS_CORNER);
 	subdivide_button_->setEnabled(placer_->canSubdivide());
 
 	old_script_row_->setVisible(has_path && placer_->hasOldScript());
@@ -1012,7 +1206,7 @@ void PathPlacerPage::refresh_paths(bool rescan_if_missing)
 	}
 }
 
-// The rows of the pattern list: number, asset name, "show in the Asset Browser", tail
+// The rows of the pattern list: number, asset name, "show in the Asset Browser", role
 // switch, repeat count, length, the buttons that move the row up and down, remove
 // button.
 void PathPlacerPage::refresh_pattern()
@@ -1026,7 +1220,7 @@ void PathPlacerPage::refresh_pattern()
 	// the current one, so that typing a length does not lose the focus.
 	QString signature = QString::number(placer_->getPathId()) + QLatin1Char(':');
 	for (const PathPatternItem &item : pattern)
-		signature += QString::fromUtf8(item.asset.path.get()) + QLatin1Char(item.tail ? '>' : '|');
+		signature += QString::fromUtf8(item.asset.path.get()) + QLatin1Char('|') + QString::number(int(item.role)) + QLatin1Char('|');
 	if (signature == pattern_signature_)
 		return;
 	pattern_signature_ = signature;
@@ -1048,27 +1242,30 @@ void PathPlacerPage::refresh_pattern()
 		"0 - ассет не занимает места: следующий объект начинается там же. Например, столб, "
 		"который стоит на стыке двух секций забора.");
 
-	const QString tail_tooltip = loc_.tip(
-		"On: this asset is not repeated along the path. It is placed once, at the very "
-		"end - right after the last object of the pattern. E.g. the last post that closes "
-		"a fence.\n"
-		"Only one asset can be the tail: while one has it, the button of the others is "
-		"locked - turn the tail off first, then turn it on where it is needed. The tail "
-		"is kept at the bottom of the list.",
-		"Вкл: этот ассет не повторяется вдоль кривой. Он ставится один раз, в самом конце - "
-		"сразу за последним объектом паттерна. Например, последний столб, который закрывает "
-		"забор.\n"
-		"Хвостом может быть только один ассет: пока он у одного, у остальных кнопка "
-		"заблокирована - сначала выключите хвост, потом включите там, где нужно. Хвост "
-		"всегда стоит внизу списка.");
+	const QString role_tooltip = loc_.tip(
+		"What the asset is.\n"
+		"Pattern - repeated along the path, as many times in a row as its count, after "
+		"the assets above it.\n"
+		"Start - placed once, first, at the start of the path. E.g. the first post of a "
+		"fence.\n"
+		"End - placed once, right after the last object of the pattern. E.g. the last post "
+		"that closes a fence (the \"Tail\" of the builds before).\n"
+		"There is one start and one end at most: picking it for another asset makes the "
+		"one that had it a Pattern again. The start is kept at the top of the list, the "
+		"end at the bottom.",
+		"Что это за ассет.\n"
+		"[[Pattern|Паттерн]] - повторяется вдоль кривой, столько раз подряд, сколько указано, "
+		"после ассетов выше него.\n"
+		"[[Start|Начало]] - ставится один раз, первым, в начале кривой. Например, первый "
+		"столб забора.\n"
+		"[[End|Конец]] - ставится один раз, сразу за последним объектом паттерна. Например, "
+		"последний столб, который закрывает забор (бывший «Хвост»).\n"
+		"Начало и конец - не больше одного: если выбрать их у другого ассета, прежний снова "
+		"станет «Паттерном». Начало всегда вверху списка, конец - внизу.");
 
 	const QString count_tooltip = loc_.tip(
 		"How many times in a row this asset is placed before the next one of the pattern.",
 		"Сколько раз подряд ставится этот ассет, прежде чем пойдёт следующий из паттерна.");
-
-	bool has_tail = false;
-	for (const PathPatternItem &item : pattern)
-		has_tail = has_tail || item.tail;
 
 	QVector<QWidget *> narrow_fields;
 
@@ -1112,20 +1309,18 @@ void PathPlacerPage::refresh_pattern()
 			refresh();
 		});
 
-		QToolButton *tail = new QToolButton;
-		tail->setText(uiText("Tail", "Хвост"));
-		tail->setCheckable(true);
-		tail->setChecked(pattern[i].tail);
-		// One tail at most: the others can not take it while it is on somewhere.
-		tail->setEnabled(pattern[i].tail || !has_tail);
-		tail->setFocusPolicy(Qt::NoFocus);
-		tail->setStyleSheet(toggleButtonStyle(QString::fromUtf8("#e08a2a"), QString::fromUtf8("#9a9a9a"), 26)
-			+ QString::fromUtf8("QToolButton { padding: 1px 3px; }"));
-		tail->setToolTip(tail_tooltip);
-		row_layout->addWidget(tail);
-		connect(tail, &QToolButton::toggled, this, [this, i](bool checked) {
+		QComboBox *role = new QComboBox;
+		role->addItem(uiText("Pattern", "Паттерн"), int(PATH_PATTERN_REPEAT));
+		role->addItem(uiText("Start", "Начало"), int(PATH_PATTERN_START));
+		role->addItem(uiText("End", "Конец"), int(PATH_PATTERN_END));
+		role->setCurrentIndex(role->findData(int(pattern[i].role)));
+		role->setToolTip(role_tooltip);
+		role->setFocusPolicy(Qt::StrongFocus);
+		role->installEventFilter(this);
+		row_layout->addWidget(role);
+		connect(role, &QComboBox::currentIndexChanged, this, [this, i, role](int index) {
 			pattern_signature_.clear();
-			placer_->setPatternTail(i, checked);
+			placer_->setPatternRole(i, PathPatternRole(role->itemData(index).toInt()));
 		});
 
 		// The sign stands next to the field, not inside it as a prefix: a field with
@@ -1138,8 +1333,8 @@ void PathPlacerPage::refresh_pattern()
 		QSpinBox *count = new QSpinBox;
 		count->setRange(1, 999);
 		count->setValue(pattern[i].count);
-		// The tail is placed once.
-		count->setEnabled(!pattern[i].tail);
+		// The start and the end are placed once.
+		count->setEnabled(pattern[i].role == PATH_PATTERN_REPEAT);
 		// The style of the editor gives number fields a width of its own, which beats a
 		// fixed width set from the code; the narrow fields get theirs back after every
 		// restyle, see eventFilter().
@@ -1170,7 +1365,7 @@ void PathPlacerPage::refresh_pattern()
 		up->setFixedSize(16, 20);
 		up->setAutoRaise(true);
 		up->setFocusPolicy(Qt::NoFocus);
-		up->setEnabled(i > 0 && pattern[i - 1].tail == pattern[i].tail);
+		up->setEnabled(i > 0 && pattern[i - 1].role == pattern[i].role);
 		up->setToolTip(loc_.tip("Move this asset up the pattern.", "Поднять этот ассет выше в паттерне."));
 		row_layout->addWidget(up);
 		connect(up, &QToolButton::clicked, this, [this, i]() {
@@ -1183,7 +1378,7 @@ void PathPlacerPage::refresh_pattern()
 		down->setFixedSize(16, 20);
 		down->setAutoRaise(true);
 		down->setFocusPolicy(Qt::NoFocus);
-		down->setEnabled(i + 1 < pattern.size() && pattern[i + 1].tail == pattern[i].tail);
+		down->setEnabled(i + 1 < pattern.size() && pattern[i + 1].role == pattern[i].role);
 		down->setToolTip(loc_.tip("Move this asset down the pattern.", "Опустить этот ассет ниже в паттерне."));
 		row_layout->addWidget(down);
 		connect(down, &QToolButton::clicked, this, [this, i]() {

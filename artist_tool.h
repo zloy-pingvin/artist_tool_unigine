@@ -8,6 +8,7 @@ class QAction;
 namespace ArtistTool
 {
 class ArtistToolWindow;
+class AssetLocator;
 }
 
 class artist_tool : public QObject, public ::UnigineEditor::Plugin
@@ -29,4 +30,6 @@ public slots:
 private:
 	QAction *action_{nullptr};
 	ArtistTool::ArtistToolWindow *window_{nullptr};
+	// The hotkey and the context menu item that go from a node to its asset.
+	ArtistTool::AssetLocator *asset_locator_{nullptr};
 };

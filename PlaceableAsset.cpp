@@ -227,10 +227,15 @@ bool showInAssetBrowser(const PlaceableAsset &asset)
 		guid = AssetManager::getAssetGUIDFromPath(asset.asset_path);
 	if (!guid.isValid() && !asset.path.empty())
 		guid = FileSystem::getGUID(asset.path.get());
+	return showAssetInBrowser(guid);
+}
+
+bool showAssetInBrowser(const UGUID &guid)
+{
 	if (!guid.isValid())
 		return false;
 
-	// The Asset Browser shows what is selected in the editor.
+	// The Asset Browser shows what is selected in the editor, and goes to its folder.
 	Vector<UGUID> guids;
 	guids.append(guid);
 	::UnigineEditor::SelectionAction::applySelection(

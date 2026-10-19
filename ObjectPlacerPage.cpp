@@ -1,4 +1,5 @@
 #include "ObjectPlacerPage.h"
+#include "SurfaceFilterButton.h"
 #include "UiHelpers.h"
 
 #include <editor/UnigineSelection.h>
@@ -14,7 +15,6 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QMenu>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
@@ -25,7 +25,6 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
-#include <QWidgetAction>
 
 #include <array>
 
@@ -75,23 +74,6 @@ enum PlacementColumn
 	COLUMN_RESET,
 };
 
-struct SurfaceTypeName
-{
-	int type;
-	const char *name;
-};
-
-const SurfaceTypeName SURFACE_TYPES[] = {
-	{PlacerOptions::SURFACE_MESH_STATIC, "Mesh Static"},
-	{PlacerOptions::SURFACE_MESH_SKINNED, "Mesh Skinned"},
-	{PlacerOptions::SURFACE_MESH_DYNAMIC, "Mesh Dynamic"},
-	{PlacerOptions::SURFACE_MESH_CLUSTER, "Mesh Cluster"},
-	{PlacerOptions::SURFACE_MESH_CLUTTER, "Mesh Clutter"},
-	{PlacerOptions::SURFACE_TERRAIN, "Terrain"},
-	{PlacerOptions::SURFACE_WATER, "Water"},
-	{PlacerOptions::SURFACE_CLOUDS, "Clouds"},
-};
-
 struct UpAxisName
 {
 	PlacerOptions::UpAxis axis;
@@ -110,26 +92,9 @@ const UpAxisName UP_AXES[] = {
 };
 
 // The icons are shared with the other tool pages, see UiHelpers.
-QIcon make_filter_icon(const QColor &)
-{
-	return makeFilterIcon();
-}
-
 QIcon make_reset_icon(const QColor &)
 {
 	return makeResetIcon();
-}
-
-// Adds a check box to a menu as an item that does not close the menu when toggled.
-QCheckBox *add_menu_check_box(QMenu *menu, const QString &text)
-{
-	QCheckBox *check = new QCheckBox(text);
-	check->setContentsMargins(8, 3, 8, 3);
-
-	QWidgetAction *action = new QWidgetAction(menu);
-	action->setDefaultWidget(check);
-	menu->addAction(action);
-	return check;
 }
 
 // An empty row that visually separates blocks of parameters.
@@ -193,13 +158,6 @@ void ObjectPlacerPage::hideEvent(QHideEvent *event)
 
 bool ObjectPlacerPage::eventFilter(QObject *watched, QEvent *event)
 {
-	if (watched == filter_button_)
-	{
-		if (event->type() == QEvent::Resize)
-			fit_filter_text();
-		return QWidget::eventFilter(watched, event);
-	}
-
 	if (event->type() == QEvent::Wheel)
 	{
 		const QWidget *widget = qobject_cast<QWidget *>(watched);
@@ -288,13 +246,7 @@ void ObjectPlacerPage::build_ui()
 		button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 		button->setFocusPolicy(Qt::NoFocus);
 		button->setToolTip(tooltip);
-		button->setStyleSheet(QString::fromUtf8(
-			"QToolButton { color: #e4e4e4; font-weight: bold; background-color: #3b3e43;"
-			" border: 1px solid #5a5d63; border-radius: 3px; padding: 3px 6px; min-width: 64px; }"
-			"QToolButton:hover { background-color: #4b4e54; }"
-			"QToolButton:pressed { background-color: #2f3236; }"
-			"QToolButton:checked { color: white; background-color: #2f6fd6; border-color: #2f6fd6; }"
-			"QToolButton:disabled { color: #7a7a7a; }"));
+		button->setStyleSheet(choiceButtonStyle());
 		object_buttons.append(button);
 		return button;
 	};
@@ -559,7 +511,7 @@ void ObjectPlacerPage::build_ui()
 
 	// Hotkeys: a collapsible list at the bottom, like in the paint tools of the editor.
 	hotkeys_header_ = new QToolButton;
-	hotkeys_header_->setText(uiText("Hotkeys", "Горячие клавиши"));
+	hotkeys_header_->setText(loc_.hotkeys("Hotkeys", "Горячие клавиши"));
 	hotkeys_header_->setCheckable(true);
 	hotkeys_header_->setChecked(true);
 	hotkeys_header_->setArrowType(Qt::DownArrow);
@@ -576,7 +528,7 @@ void ObjectPlacerPage::build_ui()
 		"размещение включено."));
 	layout->addWidget(hotkeys_header_);
 
-	QLabel *hotkeys = new QLabel(uiText(
+	QLabel *hotkeys = new QLabel(loc_.hotkeys(
 		"LMB - Place Object\n"
 		"LMB (Hold) + Mouse Move - Move Object Over Surfaces\n"
 		"LMB (Hold) + Mouse Wheel - Rotate Around Up Axis (step: 5°)\n"
@@ -674,27 +626,8 @@ QWidget *ObjectPlacerPage::createDebugControls()
 
 QWidget *ObjectPlacerPage::build_filter()
 {
-	QWidget *row = new QWidget;
-	QHBoxLayout *row_layout = new QHBoxLayout(row);
-	row_layout->setContentsMargins(0, 0, 0, 0);
-	row_layout->setSpacing(4);
-
-	filter_button_ = new QPushButton;
-	filter_button_->setIcon(make_filter_icon(icon_color()));
-	filter_button_->setIconSize(QSize(14, 14));
-	filter_button_->setMinimumHeight(24);
-	// The text is cut to the width of the button, so it must not ask for more room.
-	filter_button_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-	filter_button_->installEventFilter(this);
-	// A lighter field with the list of what is checked, like the filter of the
-	// Cluster Paint mode.
-	filter_button_->setStyleSheet(QString::fromUtf8(
-		"QPushButton { background-color: #5c6066; color: #f0f0f0; border: none; border-radius: 3px;"
-		" padding: 3px 22px 3px 7px; text-align: left; }"
-		"QPushButton:hover, QPushButton:pressed { background-color: #6b6f76; }"
-		"QPushButton::menu-indicator { subcontrol-origin: padding; subcontrol-position: right center;"
-		" right: 7px; }"));
-	filter_button_->setToolTip(loc_.tip(
+	SurfaceFilterButton::Texts texts;
+	texts.tooltip = loc_.tip(
 		"What objects can be placed on. Over the checked kinds of objects the disc under "
 		"the mouse is blue and a click places an object; over the others it is red and a "
 		"click does nothing.\n"
@@ -703,44 +636,22 @@ QWidget *ObjectPlacerPage::build_filter()
 		"На что можно ставить объекты. Над отмеченными типами объектов диск под курсором "
 		"синий и клик ставит объект; над остальными он красный и клик ничего не делает.\n"
 		"Объект неотмеченного типа не даёт поставить и на то, что находится за ним.\n"
-		"При закрытии окна инструмента фильтр возвращается к значению по умолчанию."));
-
-	QMenu *menu = new QMenu(filter_button_);
-
-	only_immovable_ = add_menu_check_box(menu, uiText("Place Only On Immovable Nodes", "Только на ноды с флагом Immovable"));
-	only_immovable_->setToolTip(loc_.tip(
+		"При закрытии окна инструмента фильтр возвращается к значению по умолчанию.");
+	texts.only_immovable = uiText("Place Only On Immovable Nodes", "Только на ноды с флагом Immovable");
+	texts.only_immovable_tooltip = loc_.tip(
 		"Place only on nodes that have the Immovable flag enabled.",
-		"Ставить только на ноды с включённым флагом Immovable."));
-	only_intersection_ = add_menu_check_box(menu, uiText("Place Only On Surfaces With Intersection", "Только на поверхности с Intersection"));
-	only_intersection_->setToolTip(loc_.tip(
+		"Ставить только на ноды с включённым флагом Immovable.");
+	texts.only_intersection = uiText("Place Only On Surfaces With Intersection", "Только на поверхности с Intersection");
+	texts.only_intersection_tooltip = loc_.tip(
 		"Place only on surfaces that have the Intersection flag and any bit of the "
 		"Intersection Mask enabled.",
 		"Ставить только на поверхности с включённым флагом Intersection и хотя бы одним "
-		"битом Intersection Mask."));
-	menu->addSeparator();
+		"битом Intersection Mask.");
+	texts.reset_tooltip = loc_.tip("Reset to default", "Сбросить на значение по умолчанию");
 
-	for (const SurfaceTypeName &type : SURFACE_TYPES)
-	{
-		FilterItem item;
-		item.check = add_menu_check_box(menu, QString::fromUtf8(type.name));
-		item.surface_type = type.type;
-		filter_types_.append(item);
-	}
-
-	filter_button_->setMenu(menu);
-	row_layout->addWidget(filter_button_, 1);
-	row_layout->addWidget(make_reset_button([this]() { reset_filter(); }));
-
-	const auto changed = [this](bool) {
-		refresh_filter_summary();
-		apply_options();
-	};
-	connect(only_immovable_, &QCheckBox::toggled, this, changed);
-	connect(only_intersection_, &QCheckBox::toggled, this, changed);
-	for (const FilterItem &item : filter_types_)
-		connect(item.check, &QCheckBox::toggled, this, changed);
-
-	return row;
+	filter_ = new SurfaceFilterButton(texts);
+	filter_->on_changed = [this]() { apply_options(); };
+	return filter_;
 }
 
 QToolButton *ObjectPlacerPage::make_reset_button(const std::function<void()> &reset)
@@ -975,11 +886,14 @@ void ObjectPlacerPage::load_settings()
 
 	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
 	settings.beginGroup(SETTINGS_GROUP);
+	hotkeys_header_->setChecked(settings.value("hotkeys_expanded", true).toBool());
+	settings.endGroup();
+	// The brush is remembered for every project on its own.
+	beginProjectGroup(settings, SETTINGS_GROUP, {QString::fromUtf8("hotkeys_expanded")});
 
 	// Every value set below would otherwise push half-loaded options to the tool.
 	updating_ = true;
 
-	hotkeys_header_->setChecked(settings.value("hotkeys_expanded", true).toBool());
 	placer_->setPlaceDummy(settings.value("place_dummy", false).toBool());
 	set_up_axis(PlacerOptions::UpAxis(settings.value("up_axis", int(defaults.up_axis)).toInt()));
 	normal_orientation_->setChecked(settings.value("normal_orientation", defaults.normal_orientation).toBool());
@@ -1005,8 +919,9 @@ void ObjectPlacerPage::load_settings()
 
 void ObjectPlacerPage::resetSettings()
 {
+	// The settings of this project only: the other projects keep theirs.
 	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
-	settings.remove(QString::fromUtf8(SETTINGS_GROUP));
+	removeProjectSettings(settings, SETTINGS_GROUP, {QString::fromUtf8("hotkeys_expanded")});
 
 	// With nothing remembered every value is loaded as its default.
 	load_settings();
@@ -1023,6 +938,8 @@ void ObjectPlacerPage::save_settings() const
 	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
 	settings.beginGroup(SETTINGS_GROUP);
 	settings.setValue("hotkeys_expanded", hotkeys_header_->isChecked());
+	settings.endGroup();
+	beginProjectGroup(settings, SETTINGS_GROUP, {QString::fromUtf8("hotkeys_expanded")});
 	settings.setValue("place_dummy", placer_->isPlaceDummy());
 	settings.setValue("up_axis", int(options.up_axis));
 	settings.setValue("normal_orientation", options.normal_orientation);
@@ -1044,14 +961,10 @@ PlacerOptions ObjectPlacerPage::read_options() const
 {
 	PlacerOptions options;
 
-	options.surface_types = 0;
-	for (const FilterItem &item : filter_types_)
-	{
-		if (item.check->isChecked())
-			options.surface_types |= item.surface_type;
-	}
-	options.only_immovable = only_immovable_->isChecked();
-	options.only_intersection = only_intersection_->isChecked();
+	const SurfaceFilter filter = filter_->getFilter();
+	options.surface_types = filter.surface_types;
+	options.only_immovable = filter.only_immovable;
+	options.only_intersection = filter.only_intersection;
 
 	options.up_axis = PlacerOptions::UpAxis(qMax(0, up_axis_->checkedId()));
 	options.normal_orientation = normal_orientation_->isChecked();
@@ -1132,43 +1045,12 @@ void ObjectPlacerPage::reset_filter()
 {
 	const PlacerOptions defaults;
 
-	updating_ = true;
-	for (const FilterItem &item : filter_types_)
-		item.check->setChecked((defaults.surface_types & item.surface_type) != 0);
-	only_immovable_->setChecked(defaults.only_immovable);
-	only_intersection_->setChecked(defaults.only_intersection);
-	updating_ = false;
-
-	refresh_filter_summary();
+	SurfaceFilter filter;
+	filter.surface_types = defaults.surface_types;
+	filter.only_immovable = defaults.only_immovable;
+	filter.only_intersection = defaults.only_intersection;
+	filter_->setFilter(filter);
 	apply_options();
-}
-
-void ObjectPlacerPage::refresh_filter_summary()
-{
-	QStringList names;
-	for (const FilterItem &item : filter_types_)
-	{
-		if (item.check->isChecked())
-			names.append(item.check->text());
-	}
-
-	// Everything that is checked, by name - the way the Cluster Paint filter shows it.
-	if (only_immovable_->isChecked())
-		names.prepend(uiText("Immovable Only", "Только Immovable"));
-	if (only_intersection_->isChecked())
-		names.prepend(uiText("With Intersection Only", "Только с Intersection"));
-
-	filter_summary_ = names.isEmpty() ? uiText("Nothing", "Ничего") : names.join(QString::fromUtf8(", "));
-	fit_filter_text();
-}
-
-// Shows as much of the summary as fits the button, with "..." at the end.
-void ObjectPlacerPage::fit_filter_text()
-{
-	// Icon, paddings and the drop-down arrow take about this much of the width.
-	const int reserved = 56;
-	const int available = qMax(40, filter_button_->width() - reserved);
-	filter_button_->setText(filter_button_->fontMetrics().elidedText(filter_summary_, Qt::ElideRight, available));
 }
 
 void ObjectPlacerPage::use_selected_as_parent()

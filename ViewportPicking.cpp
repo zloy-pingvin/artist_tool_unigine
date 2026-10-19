@@ -201,6 +201,14 @@ float viewportDistanceTo(const Math::Vec3 &point)
 	return float(Math::length(point - camera));
 }
 
+Math::Vec3 viewportCameraPosition()
+{
+	Math::Vec3 camera;
+	float fov = 60.0f;
+	viewport_camera(camera, fov);
+	return camera;
+}
+
 bool isEditorInternal(const NodePtr &node)
 {
 	for (NodePtr n = node; n; n = n->getParent())
@@ -210,6 +218,18 @@ bool isEditorInternal(const NodePtr &node)
 			return true;
 	}
 	return false;
+}
+
+bool isNodeAlive(const NodePtr &node)
+{
+	if (!node || node.isDeleted())
+		return false;
+	for (NodePtr n = node; n; n = n->getParent())
+	{
+		if (n->hasData("unigine_editor_undo_tag"))
+			return false;
+	}
+	return true;
 }
 
 bool isInside(const NodePtr &node, const NodePtr &root)
@@ -263,6 +283,8 @@ SurfaceHit raycastSurface(const Math::Vec3 &p0, const Math::Vec3 &p1, const Surf
 
 			const bool allowed = object_allowed && (!filter.only_intersection
 				|| (object->getIntersection(surface) && object->getIntersectionMask(surface) != 0));
+			if (!allowed && filter.look_through)
+				continue;
 
 			Math::Vec3 point;
 			Math::mul(point, transform, intersection->getPoint());
@@ -289,7 +311,8 @@ SurfaceHit raycastSurface(const Math::Vec3 &p0, const Math::Vec3 &p1, const Surf
 			break;
 
 		// Look behind the ignored objects and the editor helpers.
-		if (isEditorInternal(object) || is_ignored(object, ignore))
+		if (isEditorInternal(object) || is_ignored(object, ignore)
+			|| (filter.look_through && !is_object_allowed(object, filter)))
 		{
 			exclude.append(object);
 			continue;

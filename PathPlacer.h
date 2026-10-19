@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CurveEditor.h"
 #include "PlaceableAsset.h"
 #include "ViewportPicking.h"
 
@@ -9,10 +10,7 @@
 #include <UnigineVisualizer.h>
 
 #include <QByteArray>
-#include <QElapsedTimer>
 #include <QObject>
-#include <QPoint>
-#include <QPointF>
 #include <QString>
 #include <QVector>
 
@@ -55,6 +53,9 @@ struct PathSettings
 	// Straight up, not along the normal of the surface: the objects stay under the
 	// curve and the sections of a fence stay joined on a slope.
 	float ground_offset{0.0f};
+	// What the objects and the points are put on; everything else is looked through
+	// (a fence over rocks stands on the terrain under them).
+	SurfaceFilter ground;
 };
 
 // A path found in the world.
@@ -67,6 +68,18 @@ struct PathInfo
 	int objects{0};
 };
 
+// What an entry of the fill pattern is.
+enum PathPatternRole
+{
+	// A part of what is repeated along the path.
+	PATH_PATTERN_REPEAT = 0,
+	// Placed once, first, at the start of the path (the post a fence starts with).
+	PATH_PATTERN_START,
+	// Placed once, after the last repeated object (the post that closes a fence): the
+	// "tail" of the builds before.
+	PATH_PATTERN_END,
+};
+
 // One entry of the fill pattern: an asset, the length of the path it takes and how
 // many times in a row it is placed before the next entry.
 struct PathPatternItem
@@ -74,10 +87,9 @@ struct PathPatternItem
 	PlaceableAsset asset;
 	float length{1.0f};
 	int count{1};
-	// The tail entry is not a part of what is repeated along the path: it is placed
-	// once, after the last repeated object (the post that closes a fence). There is at
-	// most one tail entry, it is kept at the end of the pattern and its count is 1.
-	bool tail{false};
+	// There is at most one start entry, kept first in the pattern, and one end entry,
+	// kept last; both are placed once.
+	PathPatternRole role{PATH_PATTERN_REPEAT};
 };
 
 // Places objects along a curve drawn through points.
@@ -103,15 +115,6 @@ public:
 		MSG_INFO = 0,
 		MSG_WARNING,
 		MSG_ERROR,
-	};
-
-	// What the points selected in the editor are.
-	enum PointsState
-	{
-		POINTS_NONE = 0,
-		POINTS_SMOOTH,
-		POINTS_CORNER,
-		POINTS_MIXED,
 	};
 
 	explicit PathPlacer(QObject *parent = nullptr);
@@ -144,14 +147,27 @@ public:
 	bool hasOldScript() const;
 	void removeOldScript();
 
+	// The node new paths (and the copies of paths) are put into; none - the root of the
+	// world. It can not be a part of a path.
+	bool setParentNode(const Unigine::NodePtr &node);
+	Unigine::NodePtr getParentNode() const;
+
 	void createPath();
+	// A copy of the current path - its points, settings and pattern, no objects -
+	// becomes the current one.
+	bool clonePath();
+	// Removes the curve of the current path and keeps its objects: they go on as
+	// ordinary nodes, in a node of the name of the path.
+	bool removePathCurve();
+	// Removes the current path with its objects.
+	bool removePath();
 	// While on, a left click on a surface in a viewport adds a point at the end of
 	// the path, whatever is selected; with Ctrl it is a corner. A path made by createPath() that is left
 	// without points when this is turned off is removed.
 	// Whether it is on or not, a click on a point of the path selects it, and holding
 	// the button drags it over the surfaces.
 	void setAddingPoints(bool adding);
-	bool isAddingPoints() const { return adding_points_; }
+	bool isAddingPoints() const { return editor_.isAddingPoints(); }
 
 	const PathSettings &getSettings() const { return settings_; }
 	void setSettings(const PathSettings &settings);
@@ -162,7 +178,7 @@ public:
 	bool isLiveUpdate() const { return live_update_; }
 	void rearrange();
 
-	PointsState getSelectedPointsState() const;
+	CurvePointsState getSelectedPointsState() const;
 	void setSelectedPointsCorner(bool corner);
 	// Puts a new point in the middle of every span whose both ends are selected.
 	bool canSubdivide() const;
@@ -177,7 +193,9 @@ public:
 	void movePatternItem(int index, int offset);
 	void setPatternLength(int index, float length);
 	void setPatternCount(int index, int count);
-	void setPatternTail(int index, bool tail);
+	// Makes the entry the start, the end or a repeated one. The entry that had that
+	// role before becomes a repeated one.
+	void setPatternRole(int index, PathPatternRole role);
 	void clearPattern();
 	// How many objects fill() would create.
 	int countFill() const;
@@ -198,13 +216,6 @@ protected:
 	bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
-	// The curve as a polyline.
-	struct Curve
-	{
-		QVector<Unigine::Math::Vec3> samples;
-		double length{0.0};
-	};
-
 	// Where an object starts and where the next one does.
 	struct Slot
 	{
@@ -218,78 +229,56 @@ private:
 	Unigine::NodePtr path_node() const;
 	Unigine::NodePtr objects_node() const;
 	Unigine::NodePtr old_script_node() const;
-	Unigine::Vector<Unigine::NodePtr> selected_points() const;
 
 	void set_path(const Unigine::NodePtr &root);
+	// The current path is gone from the world by the tool: it is forgotten and the list
+	// of the paths is told once it is gone.
+	void forget_removed_path(const Unigine::NodePtr &root);
 	void load_settings();
-	void save_settings() const;
+	// With 'undoable' - as a step of the undo history (see SetNodeDataAction).
+	void save_settings(bool undoable = true);
 
-	Curve build_curve() const;
-	QVector<Slot> compute_slots(const Curve &curve, const QVector<float> &lengths, bool only_fitting) const;
+	CurvePolyline build_curve() const;
+	QVector<Slot> compute_slots(const CurvePolyline &curve, const QVector<float> &lengths, bool only_fitting) const;
 	Unigine::Math::Mat4 slot_transform(const Slot &slot, float length, const Unigine::Math::vec3 &scale) const;
 	Unigine::Math::Vec3 snap_to_ground(const Unigine::Math::Vec3 &point) const;
 	float object_length(const Unigine::NodePtr &object) const;
 	float measure_length(const PlaceableAsset &asset) const;
-	// The entries of the pattern a fill places, in order: the repeated ones as many
-	// times as fit the path, then the tail ones.
+	// The entries of the pattern a fill places, in order: the start, the repeated ones
+	// as many times as fit the path, then the end.
 	// 'cut' tells that the repeated part was stopped by the limit of objects of one
 	// fill before it got to the end of the path.
 	QVector<int> fill_sequence(bool *cut = nullptr) const;
 
 	void update();
-	void draw(const Curve &curve) const;
+	void draw(const CurvePolyline &curve) const;
 	QByteArray snapshot() const;
-	Unigine::NodePtr pick_point(const Unigine::Math::Vec3 &p0, const Unigine::Math::Vec3 &p1) const;
-	Unigine::NodePtr add_point(const Unigine::Math::Vec3 &position, bool corner);
-	void select_point(const Unigine::NodePtr &point, bool add_to_selection);
-	void begin_drag(const Unigine::NodePtr &point, bool is_new);
-	void update_drag();
-	void end_drag();
-	void finish_click();
-	bool is_point_selected(const Unigine::NodePtr &point) const;
 
 	void notify_changed() const;
 	void report(int level, const QString &text) const;
 
 	Unigine::NodePtr root_;
+	Unigine::NodePtr parent_;
 	PathSettings settings_;
 	QVector<PathPatternItem> pattern_;
 
+	// Drawing and moving the points of the curve.
+	CurveEditor editor_;
+
 	bool active_{false};
 	bool live_update_{true};
-	bool adding_points_{false};
 	// The current path has just been made by createPath(): if adding points to it ends
 	// with no points, it is removed.
 	bool discard_if_empty_{false};
 	// Such a path after it has been removed, until it is gone from the world.
 	Unigine::NodePtr removed_root_;
 	int removed_root_frames_{0};
-	// The press of the click in progress was taken by the tool; whether its release
-	// is to be kept from the editor as well.
-	bool click_taken_{false};
-	bool swallow_release_{false};
-	// The manipulators of the editor are switched off while a point is dragged, so
-	// that they do not move it at the same time.
-	bool manipulators_disabled_{false};
-
-	// The point that follows the mouse while the button that picked it is held. It
-	// starts to move only after the button has been held for a moment and the mouse
-	// has left the place of the press, so that a mere click does not shift it.
-	Unigine::NodePtr drag_point_;
-	Unigine::Math::Mat4 drag_start_transform_;
-	bool drag_is_new_{false};
-	bool drag_moving_{false};
-	QElapsedTimer drag_timer_;
-	QPoint drag_press_position_;
-
-	// The point to select when the button of the click that picked it is released.
-	// The selection is not changed while the button is down: the editor could take
-	// that for the start of a move of the newly selected node with its own tools.
-	Unigine::NodePtr pending_selection_;
-	bool pending_selection_adds_{false};
 
 	// What the objects were last arranged for; they are rearranged when it changes.
 	QByteArray arranged_state_;
+	// The settings as last written into the path or read from it: when the path has
+	// others (an undo has put the old ones back), they are read again.
+	QByteArray saved_settings_;
 	double length_{0.0};
 	int unplaced_{0};
 

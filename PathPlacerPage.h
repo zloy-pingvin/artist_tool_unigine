@@ -18,6 +18,8 @@ class QVBoxLayout;
 namespace ArtistTool
 {
 
+class SurfaceFilterButton;
+
 // "Path Placer" tool page: the current path (create, add points, smooth / corner
 // points, closed loop), how the objects stand along it, the fill pattern and the
 // one-off fill of the path with it.
@@ -45,6 +47,9 @@ protected:
 private:
 	void build_ui();
 	QWidget *build_path_group();
+	// How the objects lie on the ground: Snap To Ground with its offset and Recompute,
+	// and what they are put on. A frame of its own in the Path group.
+	QWidget *build_ground_block();
 	QWidget *build_objects_group();
 	QWidget *build_pattern_group();
 	QDoubleSpinBox *make_spin_box(double minimum, double maximum, double step, int decimals,
@@ -73,6 +78,9 @@ private:
 	// Set while the controls are being filled from the tool, so that they do not
 	// write the same values back.
 	bool updating_{false};
+	// The settings were reset: those of the current path are not remembered for the new
+	// paths until the user changes one.
+	bool settings_reset_{false};
 	// What the rows of the pattern list were last built for.
 	QString pattern_signature_;
 
@@ -87,6 +95,13 @@ private:
 	// new path left without points), the list is built anew.
 	int shown_path_id_{0};
 	QPushButton *new_path_button_{nullptr};
+	// Clone the current path, remove its curve only, remove it all.
+	QToolButton *clone_path_button_{nullptr};
+	QToolButton *remove_curve_button_{nullptr};
+	QToolButton *remove_path_button_{nullptr};
+	// The parent of the new paths.
+	QLabel *parent_label_{nullptr};
+	QToolButton *parent_clear_button_{nullptr};
 	QPushButton *add_points_button_{nullptr};
 	QToolButton *smooth_button_{nullptr};
 	QToolButton *corner_button_{nullptr};
@@ -104,6 +119,8 @@ private:
 	QLabel *ground_offset_label_{nullptr};
 	QDoubleSpinBox *ground_offset_{nullptr};
 	QToolButton *ground_offset_reset_{nullptr};
+	QPushButton *refresh_ground_{nullptr};
+	SurfaceFilterButton *ground_filter_{nullptr};
 	QCheckBox *live_update_{nullptr};
 	QPushButton *rearrange_button_{nullptr};
 

@@ -1,8 +1,11 @@
 #include "ArtistToolWindow.h"
 #include "Localization.h"
 #include "ClutterUnpackPage.h"
+#include "CurveEditor.h"
+#include "MeasurePage.h"
 #include "ObjectPlacerPage.h"
 #include "PathPlacerPage.h"
+#include "RoadBuilderPage.h"
 #include "UiHelpers.h"
 
 #ifdef ARTIST_TOOL_DEV_PAGES
@@ -19,6 +22,8 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSettings>
+#include <QCheckBox>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -54,6 +59,13 @@ ArtistToolWindow::ArtistToolWindow(QWidget *parent)
 	path_placer_page_ = new PathPlacerPage;
 	tabs_->addTab(path_placer_page_, QIcon(QString::fromUtf8(":/sandworm/images/icon_fence.png")),
 		uiText("Path Placer", "По кривой"));
+
+	road_builder_page_ = new RoadBuilderPage;
+	tabs_->addTab(road_builder_page_, QIcon(QString::fromUtf8(":/sandworm/images/icon_road.png")),
+		uiText("Road", "Дорога"));
+
+	measure_page_ = new MeasurePage;
+	tabs_->addTab(measure_page_, makeRulerIcon(), uiText("Measure", "Измерения"));
 
 	clutter_unpack_page_ = new ClutterUnpackPage;
 	tabs_->addTab(clutter_unpack_page_, QIcon(QString::fromUtf8(":/sandworm/images/icon_vegetation.png")),
@@ -109,6 +121,30 @@ QWidget *ArtistToolWindow::build_debug_page()
 	placer_layout->addWidget(object_placer_page_->createDebugControls());
 	layout->addWidget(placer_group);
 
+	// The curve of the Path Placer and the Road: the smooth spline, or the old one to
+	// compare with.
+	QGroupBox *curve_group = new QGroupBox(QString::fromUtf8("Curves"));
+	QVBoxLayout *curve_layout = new QVBoxLayout(curve_group);
+	old_curve_ = new QCheckBox(QString::fromUtf8("Old Curve (Before 1.3)"));
+	old_curve_->setToolTip(QString::fromUtf8(
+		"On: the curves of Path Placer and Road are built the old way - at every point the "
+		"direction is halfway between those to its two neighbours. It makes waves where a "
+		"point is added between two others (Subdivide).\n"
+		"Off: a smooth spline through all the points (the default).\n"
+		"The roads and paths follow at once; the generated meshes change on Generate."));
+	{
+		QSettings settings(QString::fromUtf8("zloy_pingvin"), QString::fromUtf8("artist_tool"));
+		old_curve_->setChecked(settings.value("debug/old_curve", false).toBool());
+	}
+	setOldCurve(old_curve_->isChecked());
+	connect(old_curve_, &QCheckBox::toggled, this, [](bool checked) {
+		setOldCurve(checked);
+		QSettings settings(QString::fromUtf8("zloy_pingvin"), QString::fromUtf8("artist_tool"));
+		settings.setValue("debug/old_curve", checked);
+	});
+	curve_layout->addWidget(old_curve_);
+	layout->addWidget(curve_group);
+
 	QHBoxLayout *reset_row = new QHBoxLayout;
 	QPushButton *reset_button = new QPushButton(QString::fromUtf8("Reset All Plugin Settings"));
 	reset_button->setIcon(makeResetIcon());
@@ -150,6 +186,9 @@ void ArtistToolWindow::reset_all_settings()
 
 	object_placer_page_->resetSettings();
 	path_placer_page_->resetSettings();
+	road_builder_page_->resetSettings();
+	measure_page_->resetSettings();
+	old_curve_->setChecked(false);
 	clutter_unpack_page_->resetSettings();
 }
 
@@ -170,6 +209,8 @@ void ArtistToolWindow::shutdown()
 	clutter_unpack_page_->cancel();
 	object_placer_page_->stop();
 	path_placer_page_->stop();
+	road_builder_page_->stop();
+	measure_page_->stop();
 #ifdef ARTIST_TOOL_DEV_PAGES
 	ui_gallery_page_->stop();
 #endif

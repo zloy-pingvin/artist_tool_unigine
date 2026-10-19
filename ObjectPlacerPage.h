@@ -22,6 +22,8 @@ class QToolButton;
 namespace ArtistTool
 {
 
+class SurfaceFilterButton;
+
 // "Object Placer" tool page: the surface filter, the asset picked in the Asset
 // Browser, the placement parameters (laid out like the Objects settings of the
 // Cluster Paint mode) and the toggle that turns click-to-place on and off.
@@ -68,12 +70,6 @@ private:
 		QDial *max[3]{};
 	};
 
-	struct FilterItem
-	{
-		QCheckBox *check{nullptr};
-		int surface_type{0};
-	};
-
 	void build_ui();
 	QWidget *build_filter();
 	QToolButton *make_reset_button(const std::function<void()> &reset);
@@ -105,8 +101,6 @@ private:
 	void apply_options();
 	void refresh();
 	void reset_filter();
-	void refresh_filter_summary();
-	void fit_filter_text();
 	void use_selected_as_parent();
 
 	Localization loc_;
@@ -115,12 +109,7 @@ private:
 	// Set while several controls are changed at once, to push the options only once.
 	bool updating_{false};
 
-	QPushButton *filter_button_{nullptr};
-	// What the filter button says when it is wide enough to show all of it.
-	QString filter_summary_;
-	QVector<FilterItem> filter_types_;
-	QCheckBox *only_immovable_{nullptr};
-	QCheckBox *only_intersection_{nullptr};
+	SurfaceFilterButton *filter_{nullptr};
 
 	QButtonGroup *source_{nullptr};
 	QLabel *asset_title_{nullptr};

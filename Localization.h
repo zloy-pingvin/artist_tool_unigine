@@ -28,6 +28,9 @@ public:
 	// both languages - "[[Add Points|Добавить точки]]" - and the one in the language
 	// of the captions is shown.
 	QString tip(const char *en, const char *ru) const;
+	// The list of the hotkeys of a tool and its header: Russian in both Russian modes,
+	// like a tooltip, with the names of the controls written the same way.
+	QString hotkeys(const char *en, const char *ru) const;
 
 private:
 	bool ru_labels_{false};

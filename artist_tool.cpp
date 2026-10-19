@@ -1,5 +1,7 @@
 #include "artist_tool.h"
 #include "ArtistToolWindow.h"
+#include "AssetLocator.h"
+#include "UndoActions.h"
 
 #include <editor/UnigineConstants.h>
 #include <editor/UnigineWindowManager.h>
@@ -24,11 +26,15 @@ bool artist_tool::init()
 	}
 
 	action_ = menu->addAction("Artist Tools", this, &artist_tool::showWindow);
+	asset_locator_ = new ArtistTool::AssetLocator(this);
 	return true;
 }
 
 void artist_tool::shutdown()
 {
+	delete asset_locator_;
+	asset_locator_ = nullptr;
+
 	if (action_)
 	{
 		if (QMenu *menu = WindowManager::findMenu(::UnigineEditor::Constants::MM_WINDOWS))
@@ -44,6 +50,9 @@ void artist_tool::shutdown()
 		delete window_;
 		window_ = nullptr;
 	}
+
+	// The steps of the undo history made by the plugin go away with its code.
+	ArtistTool::releaseUndoActions();
 }
 
 void artist_tool::showWindow()

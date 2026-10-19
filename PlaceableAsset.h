@@ -61,8 +61,9 @@ Unigine::NodePtr createNode(const PlaceableAsset &asset);
 
 QString kindLabel(PlaceableAsset::Kind kind);
 
-// Selects the asset in the editor, which makes the Asset Browser show it. False if
-// the file of the asset is not found.
+// Selects the asset in the editor, which makes the Asset Browser open its folder and
+// show it. False if the file of the asset is not found.
 bool showInAssetBrowser(const PlaceableAsset &asset);
+bool showAssetInBrowser(const Unigine::UGUID &guid);
 
 } // namespace ArtistTool

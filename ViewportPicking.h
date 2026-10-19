@@ -36,6 +36,10 @@ struct SurfaceFilter
 	bool only_immovable{false};
 	// Only surfaces with the Intersection flag and a non-zero Intersection Mask.
 	bool only_intersection{false};
+	// What the filter does not let through is looked through: the ray goes on to what
+	// is behind it (a road laid onto the terrain under the rocks). Off: it blocks the
+	// ray, and the hit is "not allowed".
+	bool look_through{false};
 };
 
 // Point of the surface a ray has hit.
@@ -65,9 +69,16 @@ bool screenRay(const QWidget *viewport, const QPointF &position, Unigine::Math::
 float viewportSizeAt(const Unigine::Math::Vec3 &point, float fraction);
 // The distance from the camera of the editor viewport to 'point', in units.
 float viewportDistanceTo(const Unigine::Math::Vec3 &point);
+// The position of the camera of the editor viewport.
+Unigine::Math::Vec3 viewportCameraPosition();
 
 // Editor helpers (gizmos, asset previews) live under nodes named "UnigineEditor.*".
 bool isEditorInternal(const Unigine::NodePtr &node);
+// Whether the node is in the world: not deleted, and not removed by the editor. A node
+// the editor removes (Delete, or the undo of its creation) is not deleted but kept for
+// the undo, out of the world, marked with "unigine_editor_undo_tag" - it or one of its
+// parents.
+bool isNodeAlive(const Unigine::NodePtr &node);
 // Whether the node is 'root' itself, one of its children or a part of the content of
 // a node reference found among them.
 bool isInside(const Unigine::NodePtr &node, const Unigine::NodePtr &root);
@@ -75,7 +86,8 @@ bool isInside(const Unigine::NodePtr &node, const Unigine::NodePtr &root);
 // The closest geometry along the world ray p0 -> p1 and whether an object may be
 // placed on it. Everything visible is tested - what is filtered out blocks the ray
 // rather than lets it through, so the hit is "not allowed" while the ray ends on
-// such an object. The nodes of 'ignore', with everything inside them, are skipped.
+// such an object, unless the filter looks through it (SurfaceFilter::look_through).
+// The nodes of 'ignore', with everything inside them, are skipped.
 SurfaceHit raycastSurface(const Unigine::Math::Vec3 &p0, const Unigine::Math::Vec3 &p1,
 	const SurfaceFilter &filter, const Unigine::Vector<Unigine::NodePtr> &ignore);
 

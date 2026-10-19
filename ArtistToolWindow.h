@@ -2,6 +2,7 @@
 
 #include <QWidget>
 
+class QCheckBox;
 class QTabWidget;
 
 namespace ArtistTool
@@ -9,8 +10,10 @@ namespace ArtistTool
 
 class ClutterUnpackPage;
 class IconBrowserPage;
+class MeasurePage;
 class ObjectPlacerPage;
 class PathPlacerPage;
+class RoadBuilderPage;
 class UiGalleryPage;
 
 // Main tool window of the plugin: one tab per artist tool, plus the Debug tab with
@@ -39,9 +42,12 @@ private:
 	void reset_all_settings();
 
 	QTabWidget *tabs_{nullptr};
+	QCheckBox *old_curve_{nullptr};
 	ClutterUnpackPage *clutter_unpack_page_{nullptr};
 	ObjectPlacerPage *object_placer_page_{nullptr};
 	PathPlacerPage *path_placer_page_{nullptr};
+	RoadBuilderPage *road_builder_page_{nullptr};
+	MeasurePage *measure_page_{nullptr};
 	UiGalleryPage *ui_gallery_page_{nullptr};
 	IconBrowserPage *icon_browser_page_{nullptr};
 };

@@ -1,8 +1,8 @@
 #include "PathPlacer.h"
 #include "Localization.h"
+#include "UndoActions.h"
 
 #include <editor/UnigineActions.h>
-#include <editor/UnigineObjectMode.h>
 #include <editor/UnigineSelection.h>
 #include <editor/UnigineSelector.h>
 #include <editor/UnigineUndo.h>
@@ -14,13 +14,11 @@
 #include <UnigineWorld.h>
 
 #include <QApplication>
-#include <QCursor>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QStringList>
 #include <QKeyEvent>
-#include <QMouseEvent>
-#include <QWidget>
 
 #include <algorithm>
 #include <cmath>
@@ -36,18 +34,19 @@ namespace
 {
 
 const char ROOT_NODE_NAME[] = "path_placer";
-const char PATH_NODE_NAME[] = "path";
 const char OBJECTS_NODE_NAME[] = "objects";
-const char POINT_NODE_NAME[] = "path_point_%1";
 
 // Names of the node data the tool keeps its state in.
 const char SETTINGS_DATA[] = "artist_tool_path";
-const char CORNER_DATA[] = "artist_tool_corner";
 const char LENGTH_DATA[] = "artist_tool_length";
 const char SCALE_DATA[] = "artist_tool_scale";
-// "1" on an object made from a tail entry of the pattern: it stays the last one on
-// the path whatever is added to "objects" after it.
+// "1" on an object made from the end ("tail") entry of the pattern: it stays the last
+// one on the path whatever is added to "objects" after it. "1" in HEAD_DATA - from the
+// start entry: it stays the first one.
 const char TAIL_DATA[] = "artist_tool_tail";
+const char HEAD_DATA[] = "artist_tool_head";
+// The roles of the entries of the pattern in the settings.
+const char *const ROLE_KEYS[3] = {"repeat", "start", "end"};
 
 // Pieces every span between two points is cut into. The objects are placed on the
 // resulting polyline.
@@ -58,15 +57,14 @@ const double DIRECTION_PROBE = 0.05;
 const int MAX_FILL_OBJECTS = 5000;
 const int MAX_PATTERN_COUNT = 999;
 
-// The repeated part of the pattern (tail = false) or its tail (tail = true) as the row
-// of entries it is placed in: every entry is there as many times in a row as its
-// count says.
-QVector<int> pattern_sequence(const QVector<PathPatternItem> &pattern, bool tail)
+// The entries of the pattern of one role as the row they are placed in: every entry
+// is there as many times in a row as its count says.
+QVector<int> pattern_sequence(const QVector<PathPatternItem> &pattern, PathPatternRole role)
 {
 	QVector<int> sequence;
 	for (int i = 0; i < pattern.size(); ++i)
 	{
-		if (pattern[i].tail != tail)
+		if (pattern[i].role != role)
 			continue;
 		for (int n = 0, count = qBound(1, pattern[i].count, MAX_PATTERN_COUNT); n < count; ++n)
 			sequence.append(i);
@@ -74,72 +72,34 @@ QVector<int> pattern_sequence(const QVector<PathPatternItem> &pattern, bool tail
 	return sequence;
 }
 
-// There is one tail at most: the first tail entry stays the tail, placed once. It goes
-// to the end of the pattern, the order of the rest is kept.
-void keep_tails_last(QVector<PathPatternItem> &pattern)
+// There is one start and one end at most (the first ones; the others are repeated),
+// both placed once. The start goes to the top of the pattern, the end to the bottom,
+// the order of the rest is kept.
+void keep_roles_in_order(QVector<PathPatternItem> &pattern)
 {
-	bool has_tail = false;
+	bool has_role[3] = {false, false, false};
 	for (PathPatternItem &item : pattern)
 	{
-		if (!item.tail)
+		if (item.role == PATH_PATTERN_REPEAT)
 			continue;
-		if (has_tail)
-			item.tail = false;
+		if (has_role[item.role])
+			item.role = PATH_PATTERN_REPEAT;
 		else
 			item.count = 1;
-		has_tail = true;
+		has_role[item.role] = true;
 	}
-	std::stable_partition(pattern.begin(), pattern.end(), [](const PathPatternItem &item) { return !item.tail; });
+	std::stable_partition(pattern.begin(), pattern.end(), [](const PathPatternItem &item) { return item.role == PATH_PATTERN_START; });
+	std::stable_partition(pattern.begin(), pattern.end(), [](const PathPatternItem &item) { return item.role != PATH_PATTERN_END; });
 }
 
 // How far above and below the path the ground is searched for.
 const double SNAP_UP = 5.0;
 const double SNAP_DOWN = 100.0;
 
-// How long the button must be held before the picked point starts to follow the
-// mouse. An ordinary click lasts 80-150 ms.
-const int DRAG_DELAY_MS = 200;
-
-// The points are drawn as spheres that nearly keep their size on the screen: they
-// shrink as the camera comes closer and grow as it moves away, but grow a little
-// slower than the distance does, so far points look somewhat smaller than near ones
-// and a path seen from afar is not hidden behind them. Up to POINT_FULL_SIZE_DISTANCE
-// the radius is POINT_SCREEN_RADIUS of the height of the viewport; further away that
-// part goes down as the distance in the power of POINT_DISTANCE_FALLOFF (half the
-// size at 32 times the distance), but not below POINT_MIN_SCREEN_SCALE of it.
-// A click counts as a click on a point a little outside of its sphere too.
-const float POINT_SCREEN_RADIUS = 0.014f;
-const float POINT_FULL_SIZE_DISTANCE = 5.0f;
-const float POINT_DISTANCE_FALLOFF = 0.2f;
-const float POINT_MIN_SCREEN_SCALE = 0.35f;
-
-float point_radius(const Math::Vec3 &position)
-{
-	float scale = 1.0f;
-	const float distance = viewportDistanceTo(position);
-	if (distance > POINT_FULL_SIZE_DISTANCE)
-		scale = std::pow(POINT_FULL_SIZE_DISTANCE / distance, POINT_DISTANCE_FALLOFF);
-	if (scale < POINT_MIN_SCREEN_SCALE)
-		scale = POINT_MIN_SCREEN_SCALE;
-
-	return Math::clamp(viewportSizeAt(position, POINT_SCREEN_RADIUS * scale), 0.001f, 10000.0f);
-}
-
-const float POINT_PICK_SCALE = 3.6f;
-// A selected point carries the manipulator of the editor. Its zone is barely larger
-// than its sphere, so the arrows of the manipulator stay with the editor.
-const float POINT_SELECTED_PICK_SCALE = 1.3f;
-
-NodePtr find_child(const NodePtr &node, const char *name)
-{
-	const int index = node->findChild(name);
-	return index < 0 ? NodePtr() : node->getChild(index);
-}
-
 // A path root is any node that has both a "path" and an "objects" child.
 bool is_path_root(const NodePtr &node)
 {
-	return node->findChild(PATH_NODE_NAME) >= 0 && node->findChild(OBJECTS_NODE_NAME) >= 0;
+	return node->findChild(CURVE_PATH_NODE_NAME) >= 0 && node->findChild(OBJECTS_NODE_NAME) >= 0;
 }
 
 // The root of the path the node is a part of.
@@ -153,32 +113,32 @@ NodePtr find_path_root(const NodePtr &node)
 	return NodePtr();
 }
 
-bool is_tail(const NodePtr &object)
+bool has_flag(const NodePtr &object, const char *name)
 {
-	const char *data = object->getData(TAIL_DATA);
+	const char *data = object->getData(name);
 	return data && data[0] == '1';
 }
 
 // The objects in the order they stand along the path: the order of the "objects"
-// node, but with the tail objects after all the rest. So a section added by hand -
-// which goes to the end of the list, after the tail - still stands before the tail.
+// node, but with the start objects before and the end ("tail") objects after all the
+// rest. So a section added by hand - which goes to the end of the list, after the
+// tail - still stands before the tail.
 QVector<NodePtr> objects_in_path_order(const NodePtr &objects)
 {
+	QVector<NodePtr> heads;
 	QVector<NodePtr> ordered;
 	QVector<NodePtr> tails;
 	for (int i = 0, num = objects->getNumChildren(); i < num; ++i)
 	{
 		const NodePtr object = objects->getChild(i);
-		(is_tail(object) ? tails : ordered).append(object);
+		if (has_flag(object, HEAD_DATA))
+			heads.append(object);
+		else if (has_flag(object, TAIL_DATA))
+			tails.append(object);
+		else
+			ordered.append(object);
 	}
-	ordered += tails;
-	return ordered;
-}
-
-bool is_corner(const NodePtr &point)
-{
-	const char *data = point->getData(CORNER_DATA);
-	return data && data[0] == '1';
+	return heads + ordered + tails;
 }
 
 int axis_index(AxisDirection axis)
@@ -189,14 +149,6 @@ int axis_index(AxisDirection axis)
 float axis_sign(AxisDirection axis)
 {
 	return int(axis) % 2 ? -1.0f : 1.0f;
-}
-
-Math::Vec3 bezier(const Math::Vec3 &p0, const Math::Vec3 &p1, const Math::Vec3 &p2, const Math::Vec3 &p3, double t)
-{
-	const Math::Scalar k0 = Math::Scalar(t);
-	const Math::Scalar k1 = Math::Scalar(1.0 - t);
-	return p0 * (k1 * k1 * k1) + p1 * (Math::Scalar(3.0) * k1 * k1 * k0)
-		+ p2 * (Math::Scalar(3.0) * k0 * k0 * k1) + p3 * (k0 * k0 * k0);
 }
 
 // A place on the polyline: between samples[index] and samples[index + 1].
@@ -241,84 +193,6 @@ bool advance(const QVector<Math::Vec3> &samples, Cursor &cursor, double distance
 	return false;
 }
 
-// The points of a path, in order.
-struct PathPoints
-{
-	QVector<Math::Vec3> positions;
-	QVector<bool> corners;
-	bool closed{false};
-
-	int count() const { return int(positions.size()); }
-	// Spans between neighbouring points: the last one of a closed path goes back to
-	// the first point.
-	int spans() const { return count() < 2 ? 0 : (closed ? count() : count() - 1); }
-};
-
-PathPoints collect_points(const NodePtr &path, bool closed)
-{
-	PathPoints points;
-	const int count = path ? path->getNumChildren() : 0;
-	points.positions.resize(count);
-	points.corners.resize(count);
-	for (int i = 0; i < count; ++i)
-	{
-		const NodePtr point = path->getChild(i);
-		points.positions[i] = point->getWorldPosition();
-		points.corners[i] = is_corner(point);
-	}
-	points.closed = closed && count > 2;
-	return points;
-}
-
-Math::Vec3 unit_or_zero(const Math::Vec3 &v)
-{
-	const double length = double(Math::length(v));
-	return length > 1e-9 ? v * Math::Scalar(1.0 / length) : Math::Vec3(0.0, 0.0, 0.0);
-}
-
-// The direction the curve passes a smooth point in, a unit vector: halfway between
-// the direction from the previous point and the direction to the next one, so the
-// curve goes through the point without a bend. Zero for a corner point: the curve
-// arrives and leaves it straight, so there is a sharp bend.
-Math::Vec3 point_tangent(const PathPoints &points, int i)
-{
-	if (points.corners[i])
-		return Math::Vec3(0.0, 0.0, 0.0);
-
-	const int count = points.count();
-	int prev = i - 1;
-	int next = i + 1;
-	if (points.closed)
-	{
-		prev = (prev + count) % count;
-		next = next % count;
-	} else
-	{
-		prev = prev < 0 ? 0 : prev;
-		next = next > count - 1 ? count - 1 : next;
-	}
-
-	// The two directions count the same however far the neighbours are, so a far
-	// neighbour does not pull the curve at a near one its way.
-	const Math::Vec3 p = points.positions[i];
-	return unit_or_zero(unit_or_zero(p - points.positions[prev]) + unit_or_zero(points.positions[next] - p));
-}
-
-// The place 't' (0..1) of the span that starts at the point 'span'.
-Math::Vec3 span_point(const PathPoints &points, int span, double t)
-{
-	const int next = (span + 1) % points.count();
-	const Math::Vec3 a = points.positions[span];
-	const Math::Vec3 b = points.positions[next];
-
-	// The handles of a span are a third of its own length: a short span between close
-	// points gets short handles and a long one long handles, whatever the length of
-	// the spans next to it. Handles sized by the neighbours overshoot a short span
-	// and make loops and kinks there.
-	const Math::Scalar reach = Math::Scalar(double(Math::length(b - a)) / 3.0);
-	return bezier(a, a + point_tangent(points, span) * reach, b - point_tangent(points, next) * reach, b, t);
-}
-
 void put(QByteArray &bytes, double value)
 {
 	bytes.append(reinterpret_cast<const char *>(&value), sizeof(value));
@@ -342,6 +216,8 @@ void put(QByteArray &bytes, const Math::Mat4 &value)
 PathPlacer::PathPlacer(QObject *parent)
 	: QObject(parent)
 {
+	editor_.on_changed = [this]() { notify_changed(); };
+	editor_.on_message = [this](int level, const QString &text) { report(level, text); };
 }
 
 PathPlacer::~PathPlacer()
@@ -350,6 +226,8 @@ PathPlacer::~PathPlacer()
 	on_message = nullptr;
 	on_paths_changed = nullptr;
 	setActive(false);
+	editor_.on_changed = nullptr;
+	editor_.on_message = nullptr;
 }
 
 void PathPlacer::setActive(bool active)
@@ -360,6 +238,7 @@ void PathPlacer::setActive(bool active)
 	active_ = active;
 	if (active_)
 	{
+		CurveEditor::recoverManipulators();
 		// The curve is drawn with the Visualizer, once per frame.
 		saved_visualizer_mode_ = Visualizer::getMode();
 		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
@@ -371,10 +250,7 @@ void PathPlacer::setActive(bool active)
 	} else
 	{
 		setAddingPoints(false);
-		end_drag();
-		pending_selection_ = NodePtr();
-		click_taken_ = false;
-		swallow_release_ = false;
+		editor_.reset();
 		qApp->removeEventFilter(this);
 		connections_.disconnectAll();
 		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
@@ -405,9 +281,11 @@ void PathPlacer::set_path(const NodePtr &root)
 
 	setAddingPoints(false);
 	root_ = root;
+	editor_.setRoot(root_);
 	arranged_state_.clear();
 	unplaced_ = 0;
 	load_settings();
+	editor_.setClosed(settings_.closed);
 
 	// The objects are not touched when a path is merely picked up: they are
 	// rearranged when something of the path changes.
@@ -431,8 +309,8 @@ QVector<PathInfo> PathPlacer::findPaths() const
 		PathInfo info;
 		info.id = node->getID();
 		info.name = QString::fromUtf8(node->getName());
-		info.points = find_child(node, PATH_NODE_NAME)->getNumChildren();
-		info.objects = find_child(node, OBJECTS_NODE_NAME)->getNumChildren();
+		info.points = findChildNode(node, CURVE_PATH_NODE_NAME)->getNumChildren();
+		info.objects = findChildNode(node, OBJECTS_NODE_NAME)->getNumChildren();
 		paths.append(info);
 	}
 
@@ -468,7 +346,7 @@ int PathPlacer::getPathId() const
 
 bool PathPlacer::hasPath() const
 {
-	return root_ && !root_.isDeleted() && path_node() && objects_node();
+	return isNodeAlive(root_) && path_node() && objects_node();
 }
 
 QString PathPlacer::getPathName() const
@@ -490,12 +368,12 @@ int PathPlacer::getNumObjects() const
 
 NodePtr PathPlacer::path_node() const
 {
-	return root_ && !root_.isDeleted() ? find_child(root_, PATH_NODE_NAME) : NodePtr();
+	return root_ && !root_.isDeleted() ? findChildNode(root_, CURVE_PATH_NODE_NAME) : NodePtr();
 }
 
 NodePtr PathPlacer::objects_node() const
 {
-	return root_ && !root_.isDeleted() ? find_child(root_, OBJECTS_NODE_NAME) : NodePtr();
+	return root_ && !root_.isDeleted() ? findChildNode(root_, OBJECTS_NODE_NAME) : NodePtr();
 }
 
 NodePtr PathPlacer::old_script_node() const
@@ -526,6 +404,132 @@ void PathPlacer::removeOldScript()
 	}
 }
 
+bool PathPlacer::setParentNode(const NodePtr &node)
+{
+	if (node && find_path_root(node))
+	{
+		report(MSG_WARNING, uiText("A part of a path can not be the parent of paths: select another node.",
+			"Часть кривой не может быть родителем кривых: выделите другую ноду."));
+		return false;
+	}
+	parent_ = node;
+	report(MSG_INFO, QString());
+	notify_changed();
+	return true;
+}
+
+NodePtr PathPlacer::getParentNode() const
+{
+	return isNodeAlive(parent_) ? parent_ : NodePtr();
+}
+
+void PathPlacer::forget_removed_path(const NodePtr &root)
+{
+	if (hasPath() && root_->getID() == root->getID())
+	{
+		root_ = NodePtr();
+		editor_.setRoot(NodePtr());
+		arranged_state_.clear();
+		length_ = 0.0;
+		unplaced_ = 0;
+	}
+	removed_root_ = root;
+	removed_root_frames_ = 0;
+	notify_changed();
+}
+
+bool PathPlacer::clonePath()
+{
+	if (!hasPath())
+		return false;
+	setAddingPoints(false);
+
+	// The points, the settings and the pattern; the objects are the copy's own, made by
+	// its Fill.
+	const NodePtr source = root_;
+	NodeDummyPtr root = NodeDummy::create();
+	root->setName(source->getName());
+	root->setWorldTransform(source->getWorldTransform());
+	if (const char *data = source->getData(SETTINGS_DATA))
+		root->setData(SETTINGS_DATA, data);
+	NodeDummyPtr path = NodeDummy::create();
+	path->setName(CURVE_PATH_NODE_NAME);
+	path->setWorldParent(root);
+	const NodePtr source_path = path_node();
+	path->setWorldTransform(source_path->getWorldTransform());
+	for (int i = 0, num = source_path->getNumChildren(); i < num; ++i)
+	{
+		NodePtr point = source_path->getChild(i)->clone();
+		point->setWorldParent(path);
+		point->setWorldTransform(source_path->getChild(i)->getWorldTransform());
+	}
+	NodeDummyPtr objects = NodeDummy::create();
+	objects->setName(OBJECTS_NODE_NAME);
+	objects->setWorldParent(root);
+	// Into the parent of the new paths, or next to the path.
+	if (const NodePtr parent = getParentNode() ? getParentNode() : source->getParent())
+		root->setWorldParent(parent);
+	root->setShowInEditorEnabledRecursive(true);
+	root->setSaveToWorldEnabledRecursive(true);
+	::UnigineEditor::Undo::apply(new ::UnigineEditor::CreateNodesAction(root));
+
+	selectPath(root->getID());
+	if (on_paths_changed)
+		on_paths_changed();
+	report(MSG_INFO, uiText("The path is copied: its points, settings and pattern, no objects yet.",
+		"Кривая скопирована: точки, настройки и паттерн, объектов пока нет."));
+	return true;
+}
+
+bool PathPlacer::removePathCurve()
+{
+	if (!hasPath())
+		return false;
+	setAddingPoints(false);
+
+	// The objects go to a node of the name of the path, where the path was; the path
+	// itself with its curve is removed. One undo step.
+	const NodePtr root = root_;
+	const NodePtr holder = objects_node();
+	Vector<NodePtr> objects;
+	for (int i = 0, num = holder->getNumChildren(); i < num; ++i)
+		objects.append(holder->getChild(i));
+
+	using namespace ::UnigineEditor;
+	Undo::begin();
+	if (!objects.empty())
+	{
+		NodeDummyPtr group = NodeDummy::create();
+		group->setName(root->getName());
+		if (const NodePtr parent = root->getParent())
+			group->setWorldParent(parent);
+		group->setWorldTransform(root->getWorldTransform());
+		group->setShowInEditorEnabled(true);
+		group->setSaveToWorldEnabled(true);
+		Undo::apply(new CreateNodesAction(group));
+		Undo::apply(new ReparentNodesAction(objects, group));
+	}
+	Undo::apply(new RemoveNodesAction(root));
+	Undo::commit();
+
+	forget_removed_path(root);
+	report(MSG_INFO, objects.empty() ? uiText("The path is removed; it had no objects.", "Кривая удалена; объектов у неё не было.")
+		: uiText("The curve is removed; the objects stay as ordinary nodes.", "Кривая удалена; объекты остались обычными нодами."));
+	return true;
+}
+
+bool PathPlacer::removePath()
+{
+	if (!hasPath())
+		return false;
+	setAddingPoints(false);
+	const NodePtr root = root_;
+	::UnigineEditor::Undo::apply(new ::UnigineEditor::RemoveNodesAction(root));
+	forget_removed_path(root);
+	report(MSG_INFO, uiText("The path is removed with its objects.", "Кривая удалена вместе с объектами."));
+	return true;
+}
+
 void PathPlacer::createPath()
 {
 	setAddingPoints(false);
@@ -533,11 +537,13 @@ void PathPlacer::createPath()
 	NodeDummyPtr root = NodeDummy::create();
 	root->setName(ROOT_NODE_NAME);
 	NodeDummyPtr path = NodeDummy::create();
-	path->setName(PATH_NODE_NAME);
+	path->setName(CURVE_PATH_NODE_NAME);
 	path->setWorldParent(root);
 	NodeDummyPtr objects = NodeDummy::create();
 	objects->setName(OBJECTS_NODE_NAME);
 	objects->setWorldParent(root);
+	if (const NodePtr parent = getParentNode())
+		root->setWorldParent(parent);
 
 	root->setShowInEditorEnabledRecursive(true);
 	root->setSaveToWorldEnabledRecursive(true);
@@ -546,11 +552,14 @@ void PathPlacer::createPath()
 	// The new path starts with the settings that are on the page and with an empty
 	// pattern: the assets of the previous path are not its own.
 	root_ = root;
+	editor_.setRoot(root_);
+	editor_.setClosed(settings_.closed);
 	arranged_state_.clear();
 	length_ = 0.0;
 	unplaced_ = 0;
 	pattern_.clear();
-	save_settings();
+	// A part of the new path, not a step of its own.
+	save_settings(false);
 	arranged_state_ = snapshot();
 	discard_if_empty_ = true;
 
@@ -568,10 +577,10 @@ void PathPlacer::setAddingPoints(bool adding)
 		report(MSG_WARNING, uiText("Create a path or select an existing one first.", "Сначала создайте кривую или выделите существующую."));
 		adding = false;
 	}
-	if (adding_points_ == adding)
+	if (editor_.isAddingPoints() == adding)
 		return;
 
-	adding_points_ = adding;
+	editor_.setAddingPoints(adding);
 
 	// A path made by New Path is not kept if adding points to it is over before it
 	// got a single one: there is no current path then.
@@ -582,6 +591,7 @@ void PathPlacer::setAddingPoints(bool adding)
 		{
 			const NodePtr root = root_;
 			root_ = NodePtr();
+			editor_.setRoot(NodePtr());
 			arranged_state_.clear();
 			length_ = 0.0;
 			unplaced_ = 0;
@@ -607,6 +617,9 @@ void PathPlacer::setSettings(const PathSettings &settings)
 	}
 	if (settings_.step < MIN_OBJECT_LENGTH)
 		settings_.step = MIN_OBJECT_LENGTH;
+	settings_.ground.look_through = true;
+	editor_.setClosed(settings_.closed);
+	editor_.setSurfaceFilter(settings_.ground);
 
 	if (hasPath())
 		save_settings();
@@ -631,7 +644,8 @@ void PathPlacer::setLiveUpdate(bool live)
 void PathPlacer::load_settings()
 {
 	const char *data = root_->getData(SETTINGS_DATA);
-	const QJsonObject json = QJsonDocument::fromJson(QByteArray(data ? data : "")).object();
+	saved_settings_ = QByteArray(data ? data : "");
+	const QJsonObject json = QJsonDocument::fromJson(saved_settings_).object();
 	if (json.isEmpty())
 	{
 		// A path that the tool sees for the first time keeps what is on the page. For
@@ -661,6 +675,11 @@ void PathPlacer::load_settings()
 	settings_.skew = json.value("skew").toBool(defaults.skew);
 	settings_.snap_to_ground = json.value("snap_to_ground").toBool(defaults.snap_to_ground);
 	settings_.ground_offset = float(json.value("ground_offset").toDouble(defaults.ground_offset));
+	settings_.ground.surface_types = json.value("ground_types").toInt(defaults.ground.surface_types);
+	settings_.ground.only_immovable = json.value("ground_immovable").toBool(defaults.ground.only_immovable);
+	settings_.ground.only_intersection = json.value("ground_intersection").toBool(defaults.ground.only_intersection);
+	settings_.ground.look_through = true;
+	editor_.setSurfaceFilter(settings_.ground);
 
 	pattern_.clear();
 	const QJsonArray pattern = json.value("pattern").toArray();
@@ -674,14 +693,21 @@ void PathPlacer::load_settings()
 		item.asset.name = entry.value("name").toString();
 		item.length = float(entry.value("length").toDouble(1.0));
 		item.count = qBound(1, entry.value("count").toInt(1), MAX_PATTERN_COUNT);
-		item.tail = entry.value("tail").toBool(false);
+		// The builds before 1.3 had only the tail: it is the end.
+		item.role = entry.value("tail").toBool(false) ? PATH_PATTERN_END : PATH_PATTERN_REPEAT;
+		const QString role = entry.value("role").toString();
+		for (int r = 0; r < 3; ++r)
+		{
+			if (role == QString::fromUtf8(ROLE_KEYS[r]))
+				item.role = PathPatternRole(r);
+		}
 		if (item.asset.isValid())
 			pattern_.append(item);
 	}
-	keep_tails_last(pattern_);
+	keep_roles_in_order(pattern_);
 }
 
-void PathPlacer::save_settings() const
+void PathPlacer::save_settings(bool undoable)
 {
 	if (!root_ || root_.isDeleted())
 		return;
@@ -695,6 +721,9 @@ void PathPlacer::save_settings() const
 	json.insert("skew", settings_.skew);
 	json.insert("snap_to_ground", settings_.snap_to_ground);
 	json.insert("ground_offset", double(settings_.ground_offset));
+	json.insert("ground_types", settings_.ground.surface_types);
+	json.insert("ground_immovable", settings_.ground.only_immovable);
+	json.insert("ground_intersection", settings_.ground.only_intersection);
 
 	QJsonArray pattern;
 	for (const PathPatternItem &item : pattern_)
@@ -706,339 +735,56 @@ void PathPlacer::save_settings() const
 		entry.insert("name", item.asset.name);
 		entry.insert("length", double(item.length));
 		entry.insert("count", item.count);
-		entry.insert("tail", item.tail);
+		entry.insert("role", QString::fromUtf8(ROLE_KEYS[item.role]));
+		// For the builds before 1.3: they know the end as the tail.
+		entry.insert("tail", item.role == PATH_PATTERN_END);
 		pattern.append(entry);
 	}
 	json.insert("pattern", pattern);
 
-	root_->setData(SETTINGS_DATA, QJsonDocument(json).toJson(QJsonDocument::Compact).constData());
+	// Which settings change: changes of the same ones made one right after another (a
+	// value dragged in a field) are one step of the undo history, of other ones not.
+	const QJsonObject previous = QJsonDocument::fromJson(saved_settings_).object();
+	QStringList changed;
+	for (auto it = json.constBegin(); it != json.constEnd(); ++it)
+	{
+		if (previous.value(it.key()) != it.value())
+			changed.append(it.key());
+	}
+	changed.sort();
+
+	saved_settings_ = QJsonDocument(json).toJson(QJsonDocument::Compact);
+	if (undoable)
+	{
+		SetNodeDataAction *action = new SetNodeDataAction;
+		action->setMergeKey(changed.join(QLatin1Char(',')));
+		action->set(root_, SETTINGS_DATA, saved_settings_);
+		SetNodeDataAction::push(action);
+	} else
+		root_->setData(SETTINGS_DATA, saved_settings_.constData());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // Points.
 ////////////////////////////////////////////////////////////////////////////////
-Vector<NodePtr> PathPlacer::selected_points() const
+CurvePointsState PathPlacer::getSelectedPointsState() const
 {
-	Vector<NodePtr> points;
-	const NodePtr path = path_node();
-	if (!path)
-		return points;
-
-	if (const SelectorNodes *selector = Selection::getSelectorNodes())
-	{
-		for (const NodePtr &node : selector->getNodes())
-		{
-			const NodePtr parent = node->getParent();
-			if (parent && parent->getID() == path->getID())
-				points.append(node);
-		}
-	}
-	return points;
-}
-
-PathPlacer::PointsState PathPlacer::getSelectedPointsState() const
-{
-	int smooth = 0;
-	int corner = 0;
-	for (const NodePtr &point : selected_points())
-		++(is_corner(point) ? corner : smooth);
-
-	if (smooth && corner)
-		return POINTS_MIXED;
-	if (corner)
-		return POINTS_CORNER;
-	return smooth ? POINTS_SMOOTH : POINTS_NONE;
+	return editor_.getSelectedPointsState();
 }
 
 void PathPlacer::setSelectedPointsCorner(bool corner)
 {
-	for (const NodePtr &point : selected_points())
-		point->setData(CORNER_DATA, corner ? "1" : "0");
-	notify_changed();
+	editor_.setSelectedPointsCorner(corner);
 }
 
 bool PathPlacer::canSubdivide() const
 {
-	const NodePtr path = path_node();
-	const Vector<NodePtr> selected = selected_points();
-	if (!path || selected.size() < 2)
-		return false;
-
-	const int count = path->getNumChildren();
-	const int spans = collect_points(path, settings_.closed).spans();
-	for (int i = 0; i < spans; ++i)
-	{
-		const int a = path->getChild(i)->getID();
-		const int b = path->getChild((i + 1) % count)->getID();
-		bool a_selected = false;
-		bool b_selected = false;
-		for (const NodePtr &point : selected)
-		{
-			a_selected = a_selected || point->getID() == a;
-			b_selected = b_selected || point->getID() == b;
-		}
-		if (a_selected && b_selected)
-			return true;
-	}
-	return false;
+	return editor_.canSubdivide();
 }
 
 void PathPlacer::subdivide()
 {
-	const NodePtr path = path_node();
-	if (!path)
-		return;
-
-	const PathPoints points = collect_points(path, settings_.closed);
-	const int count = points.count();
-	const Vector<NodePtr> selected = selected_points();
-	const auto is_selected = [&](int index) {
-		const int id = path->getChild(index)->getID();
-		for (const NodePtr &point : selected)
-		{
-			if (point->getID() == id)
-				return true;
-		}
-		return false;
-	};
-
-	// The spans to split, found before any point is added.
-	QVector<int> spans;
-	for (int i = 0; i < points.spans(); ++i)
-	{
-		if (is_selected(i) && is_selected((i + 1) % count))
-			spans.append(i);
-	}
-	if (spans.isEmpty())
-	{
-		report(MSG_WARNING, uiText("Select two neighbouring points of the path to put a point between them.", "Выделите две соседние точки кривой, чтобы поставить точку между ними."));
-		return;
-	}
-
-	// From the end, so that the indices of the spans that are still to be split stay.
-	Vector<NodePtr> created;
-	for (int k = int(spans.size()) - 1; k >= 0; --k)
-	{
-		const int span = spans[k];
-		NodeDummyPtr point = NodeDummy::create();
-		point->setName(QString::fromUtf8(POINT_NODE_NAME).arg(count + int(created.size())).toUtf8().constData());
-		point->setWorldParent(path);
-		path->setChildIndex(point, span + 1);
-		point->setWorldPosition(span_point(points, span, 0.5));
-		point->setShowInEditorEnabledRecursive(true);
-		point->setSaveToWorldEnabledRecursive(true);
-		created.append(point);
-	}
-	::UnigineEditor::Undo::apply(new ::UnigineEditor::CreateNodesAction(created));
-
-	report(MSG_INFO, QString());
-	notify_changed();
-}
-
-// The point of the path the world ray p0 -> p1 goes through, the closest one.
-NodePtr PathPlacer::pick_point(const Math::Vec3 &p0, const Math::Vec3 &p1) const
-{
-	const NodePtr path = path_node();
-	if (!path)
-		return NodePtr();
-
-	const Math::Vec3 direction = p1 - p0;
-	const double ray_length = double(Math::length(direction));
-	if (ray_length < 1e-9)
-		return NodePtr();
-
-	// The zone a click picks a point in is much larger than its sphere, so the zones of
-	// points that are close on the screen overlap. The point the click is closest to,
-	// in parts of its zone, wins: a click right on a point always takes that point.
-	// While points are added the clicks are the tool's and the manipulator is not
-	// used: every point keeps the large zone then.
-	const bool manipulator = !adding_points_ && ::UnigineEditor::ObjectMode::isManipulatorsEnabled();
-	const Vector<NodePtr> selected = manipulator ? selected_points() : Vector<NodePtr>();
-	NodePtr picked;
-	double picked_miss = 0.0;
-	for (int i = 0, num = path->getNumChildren(); i < num; ++i)
-	{
-		const NodePtr point = path->getChild(i);
-		const Math::Vec3 position = point->getWorldPosition();
-
-		// The place of the ray closest to the point.
-		const double along = double(Math::dot(position - p0, direction)) / ray_length;
-		if (along < 0.0 || along > ray_length)
-			continue;
-		const Math::Vec3 closest = p0 + direction * Math::Scalar(along / ray_length);
-
-		float pick_scale = POINT_PICK_SCALE;
-		for (const NodePtr &selected_point : selected)
-		{
-			if (selected_point->getID() == point->getID())
-				pick_scale = POINT_SELECTED_PICK_SCALE;
-		}
-		const double radius = double(point_radius(position) * pick_scale);
-		const double miss = double(Math::length(position - closest)) / radius;
-		if (miss > 1.0)
-			continue;
-		if (!picked || miss < picked_miss)
-		{
-			picked = point;
-			picked_miss = miss;
-		}
-	}
-	return picked;
-}
-
-// Adds a point at the end of the path, whatever is selected: drawing only continues
-// the path. A point between two others is put by Subdivide.
-NodePtr PathPlacer::add_point(const Math::Vec3 &position, bool corner)
-{
-	const NodePtr path = path_node();
-	if (!path)
-		return NodePtr();
-
-	const int count = path->getNumChildren();
-	NodeDummyPtr point = NodeDummy::create();
-	point->setName(QString::fromUtf8(POINT_NODE_NAME).arg(count).toUtf8().constData());
-	point->setWorldParent(path);
-	point->setWorldPosition(position);
-	if (corner)
-		point->setData(CORNER_DATA, "1");
-	point->setShowInEditorEnabledRecursive(true);
-	point->setSaveToWorldEnabledRecursive(true);
-	::UnigineEditor::Undo::apply(new ::UnigineEditor::CreateNodesAction(point));
-	return point;
-}
-
-void PathPlacer::select_point(const NodePtr &point, bool add_to_selection)
-{
-	Vector<NodePtr> nodes;
-	if (add_to_selection)
-	{
-		if (const SelectorNodes *selector = Selection::getSelectorNodes())
-		{
-			for (const NodePtr &node : selector->getNodes())
-			{
-				if (node->getID() != point->getID())
-					nodes.append(node);
-			}
-		}
-	}
-	nodes.append(point);
-	::UnigineEditor::SelectionAction::applySelection(new SelectorNodes(nodes));
-}
-
-void PathPlacer::begin_drag(const NodePtr &point, bool is_new)
-{
-	drag_point_ = point;
-	drag_start_transform_ = point->getWorldTransform();
-	drag_is_new_ = is_new;
-	drag_moving_ = false;
-	drag_press_position_ = QCursor::pos();
-	drag_timer_.start();
-
-	// The manipulators of the editor sit right on the point; they must not grab it
-	// while the tool is moving it.
-	if (::UnigineEditor::ObjectMode::isManipulatorsEnabled())
-	{
-		::UnigineEditor::ObjectMode::setManipulatorsEnabled(false);
-		manipulators_disabled_ = true;
-	}
-}
-
-// Every frame while a point is held: it goes to the surface under the mouse.
-void PathPlacer::update_drag()
-{
-	if (!drag_point_)
-		return;
-	if (drag_point_.isDeleted() || !(QApplication::mouseButtons() & Qt::LeftButton))
-	{
-		// The release of the button did not get to the tool (the window lost the mouse):
-		// the click is over, and no later release is to be taken for its own.
-		click_taken_ = false;
-		swallow_release_ = false;
-		finish_click();
-		return;
-	}
-
-	const QPoint mouse = QCursor::pos();
-	if (!drag_moving_)
-	{
-		drag_moving_ = drag_timer_.elapsed() >= DRAG_DELAY_MS
-			&& (mouse - drag_press_position_).manhattanLength() >= QApplication::startDragDistance();
-		if (!drag_moving_)
-			return;
-	}
-
-	QWidget *viewport = findViewportWidget(QApplication::widgetAt(mouse));
-	if (!viewport)
-		return;
-
-	Math::Vec3 p0, p1;
-	if (!screenRay(viewport, viewport->mapFromGlobal(QPointF(mouse)), p0, p1))
-		return;
-
-	// The objects of the path itself are looked through.
-	Vector<NodePtr> ignore;
-	ignore.append(root_);
-	const SurfaceHit hit = raycastSurface(p0, p1, SurfaceFilter(), ignore);
-	if (hit.found)
-	{
-		drag_point_->setWorldPosition(hit.point);
-		return;
-	}
-
-	// No surface under the mouse: the point keeps its height and goes along the
-	// horizontal plane it is in, to where the mouse ray crosses that plane.
-	const Math::Vec3 position = drag_point_->getWorldPosition();
-	const Math::Vec3 direction = p1 - p0;
-	if (std::abs(double(direction.z)) < 1e-9)
-		return;
-	const double along = double(position.z - p0.z) / double(direction.z);
-	if (along > 0.0 && along <= 1.0)
-		drag_point_->setWorldPosition(p0 + direction * Math::Scalar(along));
-}
-
-void PathPlacer::end_drag()
-{
-	if (manipulators_disabled_)
-	{
-		::UnigineEditor::ObjectMode::setManipulatorsEnabled(true);
-		manipulators_disabled_ = false;
-	}
-
-	// The move of an existing point is one undo step. A point that has just been
-	// added needs none: undoing its creation removes it wherever it is.
-	if (drag_point_ && !drag_point_.isDeleted() && !drag_is_new_)
-	{
-		const Math::Mat4 moved = drag_point_->getWorldTransform();
-		if (moved != drag_start_transform_)
-		{
-			drag_point_->setWorldTransform(drag_start_transform_);
-			::UnigineEditor::Undo::apply(new ::UnigineEditor::SetNodeTransformAction(drag_point_, moved));
-		}
-	}
-
-	drag_point_ = NodePtr();
-	drag_moving_ = false;
-}
-
-// What a click taken by the tool ends with, when its button is released: the held
-// point stays where it is and the picked point becomes selected.
-void PathPlacer::finish_click()
-{
-	end_drag();
-
-	if (pending_selection_ && !pending_selection_.isDeleted())
-		select_point(pending_selection_, pending_selection_adds_);
-	pending_selection_ = NodePtr();
-}
-
-bool PathPlacer::is_point_selected(const NodePtr &point) const
-{
-	for (const NodePtr &selected : selected_points())
-	{
-		if (selected->getID() == point->getID())
-			return true;
-	}
-	return false;
+	editor_.subdivide();
 }
 
 bool PathPlacer::eventFilter(QObject *watched, QEvent *event)
@@ -1046,152 +792,27 @@ bool PathPlacer::eventFilter(QObject *watched, QEvent *event)
 	if (!active_ || !hasPath())
 		return false;
 
-	switch (event->type())
+	if (event->type() == QEvent::KeyPress && isAddingPoints()
+		&& static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)
 	{
-		case QEvent::KeyPress:
-			if (adding_points_ && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)
-			{
-				setAddingPoints(false);
-				return true;
-			}
-			break;
-
-		case QEvent::MouseButtonPress:
-		case QEvent::MouseButtonDblClick:	// the second click of a fast pair
-		{
-			const QMouseEvent *mouse = static_cast<QMouseEvent *>(event);
-			if (mouse->button() != Qt::LeftButton)
-				break;
-
-			// A press that is not taken below goes to the editor with its release -
-			// whatever the reason it is not taken for.
-			click_taken_ = false;
-			swallow_release_ = false;
-
-			// Alt + LMB stays with the editor camera.
-			if (mouse->modifiers() & Qt::AltModifier)
-				break;
-
-			QWidget *viewport = findViewportWidget(watched);
-			if (!viewport || !World::isLoaded())
-				break;
-
-			Math::Vec3 p0, p1;
-			if (!screenRay(viewport, viewport->mapFromGlobal(mouse->globalPosition()), p0, p1))
-				break;
-
-			// While Snap to Surface of the editor is on, moving nodes over the surfaces
-			// is the editor's job and the tool keeps out of it: taking the clicks on a
-			// point away from the editor then breaks its snap (it does not let go of
-			// the node). The tool drags points itself only while that snap is off.
-			const bool editor_snap = ::UnigineEditor::ObjectMode::isSnapToSurfaceEnabled();
-
-			// A click on a point selects it; Ctrl or Shift add it to the selection.
-			// Holding the button drags the point over the surfaces (over the empty
-			// space - at its own height), selected or not.
-			if (NodePtr point = pick_point(p0, p1))
-			{
-				const bool add_to_selection = mouse->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier);
-				const bool already_selected = !add_to_selection && is_point_selected(point);
-
-				// With the editor's snap on, a selected point is left to the editor
-				// entirely: the click goes to its tools as if the tool were not there.
-				if (editor_snap && already_selected)
-					break;
-
-				if (!already_selected)
-				{
-					pending_selection_ = point;
-					pending_selection_adds_ = add_to_selection;
-				}
-				if (!add_to_selection && !editor_snap)
-					begin_drag(point, false);
-
-				click_taken_ = true;
-				// The editor has its own tools on a selected point (the manipulators,
-				// Snap to Surface) and may have started one of them on this press in
-				// spite of the tool taking it. Its release is therefore let through:
-				// the editor must be able to end what it started.
-				swallow_release_ = !already_selected;
-				return true;
-			}
-
-			// Anything else is the editor's own click, unless points are being added.
-			if (!adding_points_)
-				break;
-
-			// Ctrl makes the new point a corner right away.
-			Vector<NodePtr> ignore;
-			ignore.append(root_);
-			const SurfaceHit hit = raycastSurface(p0, p1, SurfaceFilter(), ignore);
-			if (!hit.found)
-				report(MSG_WARNING, uiText("Click on a surface to add a point there.", "Кликните по поверхности, чтобы добавить на неё точку."));
-			else if (NodePtr point = add_point(hit.point, mouse->modifiers() & Qt::ControlModifier))
-			{
-				// The new point is not selected: it is the last one and is drawn green,
-				// the point the next one continues from.
-				if (!editor_snap)
-					begin_drag(point, true);
-				report(MSG_INFO, QString());
-				notify_changed();
-			}
-			click_taken_ = true;
-			swallow_release_ = true;
-			return true;
-		}
-
-		case QEvent::MouseButtonRelease:
-			if (static_cast<QMouseEvent *>(event)->button() != Qt::LeftButton)
-				break;
-			// The release of a press the tool has taken ends its click. It is kept
-			// from the editor only if the press was, and never otherwise: the editor
-			// must always see the end of a click it saw the start of.
-			if (click_taken_ && watched->isWidgetType())
-			{
-				const bool swallow = swallow_release_ && findViewportWidget(watched) != nullptr;
-				click_taken_ = false;
-				swallow_release_ = false;
-				finish_click();
-				return swallow;
-			}
-			break;
-
-		default:
-			break;
+		setAddingPoints(false);
+		return true;
 	}
-
-	return false;
+	return editor_.handleEvent(watched, event);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // Curve.
 ////////////////////////////////////////////////////////////////////////////////
-PathPlacer::Curve PathPlacer::build_curve() const
+CurvePolyline PathPlacer::build_curve() const
 {
-	Curve curve;
-	const PathPoints points = collect_points(path_node(), settings_.closed);
-	const int spans = points.spans();
-	if (spans == 0)
-		return curve;
-
-	curve.samples.reserve(spans * CURVE_SUBDIVISIONS + 1);
-	curve.samples.append(points.positions[0]);
-	for (int i = 0; i < spans; ++i)
-	{
-		for (int s = 1; s <= CURVE_SUBDIVISIONS; ++s)
-		{
-			const Math::Vec3 p = span_point(points, i, double(s) / CURVE_SUBDIVISIONS);
-			curve.length += double(Math::length(p - curve.samples.last()));
-			curve.samples.append(p);
-		}
-	}
-	return curve;
+	return buildPolyline(CurvePoints::collect(path_node(), settings_.closed), CURVE_SUBDIVISIONS);
 }
 
 // Lays objects of the given lengths one after another from the start of the curve.
 // An object that the curve ends inside of still gets a place (it sticks out past the
 // end), unless only the ones that fit entirely are asked for; the rest get none.
-QVector<PathPlacer::Slot> PathPlacer::compute_slots(const Curve &curve, const QVector<float> &lengths,
+QVector<PathPlacer::Slot> PathPlacer::compute_slots(const CurvePolyline &curve, const QVector<float> &lengths,
 	bool only_fitting) const
 {
 	QVector<Slot> result;
@@ -1216,7 +837,7 @@ QVector<PathPlacer::Slot> PathPlacer::compute_slots(const Curve &curve, const QV
 			if (advance(samples, ahead, DIRECTION_PROBE))
 				direction = ahead.position - cursor.position;
 
-			slot.end = slot.start + unit_or_zero(direction);
+			slot.end = slot.start + unitOrZero(direction);
 			slot.no_length = true;
 			result.append(slot);
 			continue;
@@ -1253,7 +874,7 @@ Math::Vec3 PathPlacer::snap_to_ground(const Math::Vec3 &point) const
 
 	const Math::Vec3 above = point + Math::Vec3(0.0, 0.0, SNAP_UP);
 	const Math::Vec3 below = point - Math::Vec3(0.0, 0.0, SNAP_DOWN);
-	const SurfaceHit hit = raycastSurface(above, below, SurfaceFilter(), ignore);
+	const SurfaceHit hit = raycastSurface(above, below, settings_.ground, ignore);
 	return hit.found ? Math::Vec3(point.x, point.y, hit.point.z + Math::Scalar(settings_.ground_offset)) : point;
 }
 
@@ -1324,7 +945,7 @@ void PathPlacer::rearrange()
 	if (!objects)
 		return;
 
-	const Curve curve = build_curve();
+	const CurvePolyline curve = build_curve();
 	length_ = curve.length;
 
 	const QVector<NodePtr> ordered = objects_in_path_order(objects);
@@ -1387,6 +1008,7 @@ QByteArray PathPlacer::snapshot() const
 	if (!path || !objects)
 		return state;
 
+	put(state, double(isOldCurve()));
 	put(state, double(settings_.step));
 	put(state, double(settings_.forward_axis));
 	put(state, double(settings_.up_axis));
@@ -1395,12 +1017,15 @@ QByteArray PathPlacer::snapshot() const
 	put(state, double(settings_.skew));
 	put(state, double(settings_.snap_to_ground));
 	put(state, double(settings_.ground_offset));
+	put(state, double(settings_.ground.surface_types));
+	put(state, double(settings_.ground.only_immovable));
+	put(state, double(settings_.ground.only_intersection));
 
 	for (int i = 0, num = path->getNumChildren(); i < num; ++i)
 	{
 		const NodePtr point = path->getChild(i);
 		put(state, point->getWorldPosition());
-		put(state, double(is_corner(point)));
+		put(state, double(isCornerPoint(point)));
 	}
 	for (int i = 0, num = objects->getNumChildren(); i < num; ++i)
 	{
@@ -1434,24 +1059,33 @@ void PathPlacer::update()
 	if (root_ && !hasPath())
 	{
 		root_ = NodePtr();
+		// A point may have been held at that moment: the drag is over, and the
+		// manipulators of the editor it had turned off come back.
+		editor_.setRoot(NodePtr());
 		arranged_state_.clear();
 		length_ = 0.0;
 		unplaced_ = 0;
-		// A point may have been held at that moment: the drag is over, and the
-		// manipulators of the editor it had turned off come back.
-		end_drag();
-		pending_selection_ = NodePtr();
-		click_taken_ = false;
-		swallow_release_ = false;
 		setAddingPoints(false);
 		notify_changed();
 	}
 	if (!hasPath())
 		return;
 
-	update_drag();
+	// The settings in the path are not those last written or read: an undo or a redo
+	// has put others there.
+	{
+		const char *data = root_->getData(SETTINGS_DATA);
+		if (QByteArray(data ? data : "") != saved_settings_)
+		{
+			load_settings();
+			editor_.setClosed(settings_.closed);
+			notify_changed();
+		}
+	}
 
-	const Curve curve = build_curve();
+	editor_.update();
+
+	const CurvePolyline curve = build_curve();
 	draw(curve);
 
 	const QByteArray state = snapshot();
@@ -1469,48 +1103,13 @@ void PathPlacer::update()
 	notify_changed();
 }
 
-void PathPlacer::draw(const Curve &curve) const
+void PathPlacer::draw(const CurvePolyline &curve) const
 {
 	const Math::vec4 line_color(1.0f, 1.0f, 1.0f, 1.0f);
 	for (int i = 0; i + 1 < curve.samples.size(); ++i)
 		Visualizer::renderLine3D(curve.samples[i], curve.samples[i + 1], line_color, 0.0f, false);
 
-	const NodePtr path = path_node();
-	if (!path)
-		return;
-
-	// Points: the selected ones are orange, the last one is green (a drawn point is
-	// added after it), corners are white, smooth points blue.
-	//
-	// The editor gets the new selection only when the mouse button is released. Until
-	// then the points are shown the way they are going to be: a point picked without
-	// Ctrl or Shift replaces the selection, so the points selected before it are
-	// already drawn as not selected while it is held and dragged.
-	const bool has_pending = pending_selection_ && !pending_selection_.isDeleted();
-	Vector<NodePtr> selected;
-	if (!has_pending || pending_selection_adds_)
-		selected = selected_points();
-	for (int i = 0, num = path->getNumChildren(); i < num; ++i)
-	{
-		const NodePtr point = path->getChild(i);
-		const Math::Vec3 position = point->getWorldPosition();
-
-		Math::vec4 color(0.35f, 0.7f, 1.0f, 1.0f);
-		if (is_corner(point))
-			color = Math::vec4(1.0f, 1.0f, 1.0f, 1.0f);
-		if (i == num - 1)
-			color = Math::vec4(0.3f, 0.9f, 0.3f, 1.0f);
-		for (const NodePtr &selected_point : selected)
-		{
-			if (selected_point->getID() == point->getID())
-				color = Math::vec4(1.0f, 0.55f, 0.1f, 1.0f);
-		}
-		// The point picked by the click that is still held is about to be selected.
-		if (has_pending && pending_selection_->getID() == point->getID())
-			color = Math::vec4(1.0f, 0.55f, 0.1f, 1.0f);
-
-		Visualizer::renderSolidSphere(point_radius(position), Math::translate(position), color, 0.0f, false);
-	}
+	editor_.drawPoints();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1532,8 +1131,8 @@ bool PathPlacer::addPatternAssets()
 		item.length = measure_length(asset);
 		pattern_.append(item);
 	}
-	// New assets join the repeated part, above the tail.
-	keep_tails_last(pattern_);
+	// New assets join the repeated part, above the end.
+	keep_roles_in_order(pattern_);
 	save_settings();
 	report(MSG_INFO, QString());
 	notify_changed();
@@ -1554,8 +1153,8 @@ void PathPlacer::movePatternItem(int index, int offset)
 	const int target = index + offset;
 	if (index < 0 || index >= pattern_.size() || target < 0 || target >= pattern_.size() || target == index)
 		return;
-	// The repeated entries and the tail ones do not mix.
-	if (pattern_[index].tail != pattern_[target].tail)
+	// The repeated entries, the start and the end do not mix.
+	if (pattern_[index].role != pattern_[target].role)
 		return;
 	pattern_.move(index, target);
 	save_settings();
@@ -1576,28 +1175,27 @@ void PathPlacer::setPatternCount(int index, int count)
 {
 	if (index < 0 || index >= pattern_.size())
 		return;
-	// The tail is placed once.
-	pattern_[index].count = pattern_[index].tail ? 1 : qBound(1, count, MAX_PATTERN_COUNT);
+	// The start and the end are placed once.
+	pattern_[index].count = pattern_[index].role != PATH_PATTERN_REPEAT ? 1 : qBound(1, count, MAX_PATTERN_COUNT);
 	save_settings();
 	notify_changed();
 }
 
-void PathPlacer::setPatternTail(int index, bool tail)
+void PathPlacer::setPatternRole(int index, PathPatternRole role)
 {
 	if (index < 0 || index >= pattern_.size())
 		return;
-	// The tail is not taken from another entry: it has to be turned off there first,
-	// so that it does not change its place unnoticed.
-	if (tail)
+	// One start and one end: the entry that had the role is repeated now.
+	if (role != PATH_PATTERN_REPEAT)
 	{
 		for (int i = 0; i < pattern_.size(); ++i)
 		{
-			if (i != index && pattern_[i].tail)
-				return;
+			if (i != index && pattern_[i].role == role)
+				pattern_[i].role = PATH_PATTERN_REPEAT;
 		}
 	}
-	pattern_[index].tail = tail;
-	keep_tails_last(pattern_);
+	pattern_[index].role = role;
+	keep_roles_in_order(pattern_);
 	save_settings();
 	notify_changed();
 }
@@ -1634,8 +1232,9 @@ QVector<int> PathPlacer::fill_sequence(bool *cut) const
 	if (!hasPath() || pattern_.isEmpty())
 		return result;
 
-	// The repeated part: as many objects as fit the path.
-	const QVector<int> repeated = pattern_sequence(pattern_, false);
+	// The start, then the repeated part: as many objects as fit the path after it.
+	const QVector<int> start = pattern_sequence(pattern_, PATH_PATTERN_START);
+	const QVector<int> repeated = pattern_sequence(pattern_, PATH_PATTERN_REPEAT);
 	// An item shorter than the minimum takes no length, the same as in compute_slots():
 	// such items do not add up to a length that could be repeated along the path.
 	float repeated_length = 0.0f;
@@ -1645,26 +1244,45 @@ QVector<int> PathPlacer::fill_sequence(bool *cut) const
 			repeated_length += pattern_[index].length;
 	}
 
-	if (repeated_length < MIN_OBJECT_LENGTH)
+	result = start;
+	if (repeated.isEmpty())
+	{
+		// Only the start and the end.
+	} else if (repeated_length < MIN_OBJECT_LENGTH)
 	{
 		// Nothing of the repeated part takes any length: repeating it would never get
-		// along the path, so it is placed once, at the start.
-		result = repeated;
+		// along the path, so it is placed once, after the start.
+		result += repeated;
 	} else
 	{
-		QVector<float> lengths(MAX_FILL_OBJECTS);
+		// The start takes its length of the path first.
+		QVector<float> lengths;
+		for (int index : start)
+			lengths.append(pattern_[index].length);
 		for (int i = 0; i < MAX_FILL_OBJECTS; ++i)
-			lengths[i] = pattern_[repeated[i % repeated.size()]].length;
+			lengths.append(pattern_[repeated[i % repeated.size()]].length);
 
-		const int fitting = int(compute_slots(build_curve(), lengths, true).size());
+		const int fitting = qMax(0, int(compute_slots(build_curve(), lengths, true).size()) - int(start.size()));
 		for (int i = 0; i < fitting; ++i)
 			result.append(repeated[i % repeated.size()]);
 		if (cut)
 			*cut = fitting >= MAX_FILL_OBJECTS;
 	}
 
-	// The tail: once, right after the last repeated object.
-	result += pattern_sequence(pattern_, true);
+	// The end: once, right after the last repeated object. However the sequence was
+	// made, it has no more than MAX_FILL_OBJECTS objects: the end is kept, what does
+	// not fit before it is cut.
+	const QVector<int> end = pattern_sequence(pattern_, PATH_PATTERN_END);
+	const int before_end = qMax(0, MAX_FILL_OBJECTS - int(end.size()));
+	if (result.size() > before_end)
+	{
+		result.resize(before_end);
+		if (cut)
+			*cut = true;
+	}
+	result += end;
+	if (result.size() > MAX_FILL_OBJECTS)
+		result.resize(MAX_FILL_OBJECTS);
 	return result;
 }
 
@@ -1705,20 +1323,28 @@ bool PathPlacer::fill()
 	for (int i = 0, num = objects->getNumChildren(); i < num; ++i)
 		old_objects.append(objects->getChild(i));
 
-	// The new objects are made before the old ones are taken away: if none can be
-	// made (the assets of the pattern are gone from the project), the path keeps
-	// what it has.
+	// The new objects are made before the old ones are taken away: if any of them can
+	// not be made (an asset of the pattern is gone from the project), the path keeps
+	// what it has, rather than get a part of the pattern only.
 	Vector<NodePtr> created;
 	for (int i = 0; i < count; ++i)
 	{
 		const PathPatternItem &item = pattern_[sequence[i]];
 		NodePtr node = createNode(item.asset);
 		if (!node)
-			continue;
+		{
+			for (const NodePtr &made : created)
+				made.deleteLater();
+			report(MSG_ERROR, uiText("Could not create an object from %1. The path is left as it was.",
+				"Не удалось создать объект из %1. Кривая оставлена как была.").arg(item.asset.name));
+			return false;
+		}
 
 		node->setData(LENGTH_DATA, QByteArray::number(double(item.length)).constData());
-		if (item.tail)
+		if (item.role == PATH_PATTERN_END)
 			node->setData(TAIL_DATA, "1");
+		else if (item.role == PATH_PATTERN_START)
+			node->setData(HEAD_DATA, "1");
 		node->setWorldParent(objects);
 		node->setShowInEditorEnabledRecursive(true);
 		node->setSaveToWorldEnabledRecursive(true);

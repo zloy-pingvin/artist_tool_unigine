@@ -17,6 +17,7 @@
 #include <UnigineWorld.h>
 
 #include <QTimer>
+#include <QVector>
 
 #include <cmath>
 
@@ -614,47 +615,68 @@ void ClutterUnpacker::finish_world_clutter_bake()
 		tmp.deleteLater();
 	}
 
-	// The instances are told apart by the name of the root node of their asset. Two
-	// assets whose root nodes are named the same can not be: all their instances come
-	// out as the first of the two, and the user is told so.
-	for (int a = 0; a < ref_names.size(); ++a)
+	// The instances are told apart by the name of the root node of their asset. An
+	// instance that matches no asset, or two assets whose root nodes are named the
+	// same, would be unpacked as a wrong asset: then nothing is unpacked, and the
+	// clutter stays as it was.
+	QVector<int> matches;
+	int unmatched = 0;
+	int ambiguous_a = -1;
+	int ambiguous_b = -1;
+	for (const Captured &c : captured)
 	{
-		for (int b = a + 1; b < ref_names.size(); ++b)
+		int idx = -1;
+		for (int k = 0; k < ref_names.size(); ++k)
 		{
-			if (ref_names[a].empty() || ref_names[a] != ref_names[b])
+			if (ref_names[k] != c.name)
 				continue;
-			emit message(MSG_WARNING, uiText(
-				"'%1': node references %2 and %3 have root nodes of the same name ('%4'). Their "
-				"instances can not be told apart and are all unpacked as number %2. Rename the "
-				"root node of one of the assets to unpack them right.",
-				"'%1': у node reference %2 и %3 корневые ноды называются одинаково ('%4'). Их "
-				"экземпляры не различить, все распакованы как номер %2. Переименуйте корневую "
-				"ноду одного из ассетов, чтобы распаковка была верной.")
-				.arg(node_name(clutter)).arg(a + 1).arg(b + 1).arg(QString::fromUtf8(ref_names[a].get())));
+			if (idx < 0)
+				idx = k;
+			else if (ambiguous_a < 0)
+			{
+				ambiguous_a = idx;
+				ambiguous_b = k;
+			}
 		}
+		if (idx < 0)
+			++unmatched;
+		matches.append(idx);
+	}
+	if (ambiguous_a >= 0)
+	{
+		restore_bake_state(true);
+		emit message(MSG_ERROR, uiText(
+			"'%1': node references %2 and %3 have root nodes of the same name ('%4'), their "
+			"instances can not be told apart. Nothing was unpacked: rename the root node of one "
+			"of the assets.",
+			"'%1': у node reference %2 и %3 корневые ноды называются одинаково ('%4'), их "
+			"экземпляры не различить. Ничего не распаковано: переименуйте корневую ноду одного "
+			"из ассетов.")
+			.arg(node_name(clutter)).arg(ambiguous_a + 1).arg(ambiguous_b + 1)
+			.arg(QString::fromUtf8(ref_names[ambiguous_a].get())));
+		node_done(false, 0);
+		return;
+	}
+	if (unmatched)
+	{
+		restore_bake_state(true);
+		emit message(MSG_ERROR, uiText(
+			"'%1': %2 instances could not be matched to an asset by the name of its root node. "
+			"Nothing was unpacked.",
+			"'%1': экземпляры (%2) не удалось сопоставить с ассетом по имени корневой ноды. "
+			"Ничего не распаковано.").arg(node_name(clutter)).arg(unmatched));
+		node_done(false, 0);
+		return;
 	}
 
 	// Build the hierarchy: root -> (per-asset group) -> instances.
 	NodePtr root = make_root(clutter);
 	Vector<NodeDummyPtr> groups;
 	groups.resize(ref_paths.size());
-	int unmatched = 0;
-	for (const Captured &c : captured)
+	for (int i = 0; i < captured.size(); ++i)
 	{
-		int idx = -1;
-		for (int k = 0; k < ref_names.size(); ++k)
-		{
-			if (ref_names[k] == c.name)
-			{
-				idx = k;
-				break;
-			}
-		}
-		if (idx < 0)
-		{
-			idx = 0;
-			++unmatched;
-		}
+		const Captured &c = captured[i];
+		const int idx = matches[i];
 
 		NodePtr parent = root;
 		if (options_.group_by_asset)
@@ -689,14 +711,6 @@ void ClutterUnpacker::finish_world_clutter_bake()
 
 	emit message(MSG_SUCCESS, uiText("'%1' -> '%2': %3 node references.", "'%1' -> '%2': node reference: %3.")
 		.arg(node_name(clutter), node_name(root)).arg(captured.size()));
-	if (unmatched)
-	{
-		emit message(MSG_WARNING, uiText(
-			"'%1': %2 instances could not be matched to an asset by name and were "
-			"assigned to the first one.",
-			"'%1': экземпляры (%2) не удалось сопоставить с ассетом по имени, они отнесены "
-			"к первому.").arg(node_name(clutter)).arg(unmatched));
-	}
 
 	node_done(true, captured.size());
 }

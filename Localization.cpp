@@ -118,4 +118,9 @@ QString Localization::tip(const char *en, const char *ru) const
 	return resolve_names(QString::fromUtf8(ru), ru_labels_);
 }
 
+QString Localization::hotkeys(const char *en, const char *ru) const
+{
+	return tip(en, ru);
+}
+
 } // namespace ArtistTool
