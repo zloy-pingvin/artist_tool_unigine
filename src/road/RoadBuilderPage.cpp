@@ -1,4 +1,6 @@
 #include "RoadBuilderPage.h"
+#include "AssetField.h"
+#include "PlaceableAsset.h"
 #include "SurfaceFilterButton.h"
 #include "UiHelpers.h"
 
@@ -857,6 +859,34 @@ QWidget *RoadBuilderPage::build_shape_group()
 	});
 	bend_rows_ << bend_merge_;
 
+	// A bent mesh only: in the place left free under Roll.
+	const QString mesh_angle_tooltip = loc_.tip(
+		"The meshes get more segments only where the curve bends or rolls them by more than this "
+		"angle across one segment: they bend smoothly, and the straight parts get no more triangles. "
+		"Off - as they are.",
+		"Меши получают дополнительные сегменты только там, где кривая гнёт или наклоняет их "
+		"больше чем на этот угол в пределах одного сегмента: они гнутся плавно, а прямые участки "
+		"лишних треугольников не получают. «Выкл» - как есть.");
+	QLabel *mesh_angle_label = new QLabel(uiText("Mesh Angle", "Угол меша"));
+	mesh_angle_label->setToolTip(mesh_angle_tooltip);
+	mesh_angle_label->setContentsMargins(8, 0, 0, 0);
+	bend_mesh_angle_ = make_spin_box(0.0, 90.0, 1.0, 1, mesh_angle_tooltip);
+	bend_mesh_angle_->setSuffix(QString::fromUtf8("°"));
+	bend_mesh_angle_->setSpecialValueText(uiText("Off", "Выкл"));
+	QToolButton *mesh_angle_reset = makeResetButton(reset_tooltip, this,
+		[this, defaults]() { bend_mesh_angle_->setValue(defaults.bend_mesh_angle); });
+	layout->addWidget(mesh_angle_label, 2, 3);
+	layout->addWidget(bend_mesh_angle_, 2, 4);
+	layout->addWidget(mesh_angle_reset, 2, 5);
+	bend_rows_ << mesh_angle_label << bend_mesh_angle_ << mesh_angle_reset;
+	connect(bend_mesh_angle_, &QDoubleSpinBox::valueChanged, this, [this](double) {
+		if (updating_)
+			return;
+		RoadSettings settings = builder_->getSettings();
+		settings.bend_mesh_angle = float(bend_mesh_angle_->value());
+		builder_->setSettings(settings);
+	});
+
 	const QString piece_tooltip = loc_.tip(
 		"The longest one piece of the road may be, in units. A longer road is cut into "
 		"pieces of about the same length, each a node and a mesh of its own: the engine "
@@ -1129,7 +1159,7 @@ QWidget *RoadBuilderPage::build_texture_group()
 	QVBoxLayout *rotation_info = new QVBoxLayout;
 	rotation_info->setSpacing(1);
 	rotation_info->addStretch(1);
-	QLabel *rotation_label = new QLabel(uiText("Rotation", "Поворот"));
+	QLabel *rotation_label = new QLabel(uiText("UV Rotation", "Поворот UV"));
 	rotation_label->setToolTip(rotation_tooltip);
 	rotation_info->addWidget(rotation_label);
 	rotation_info->addWidget(uv_rotation_value_);
@@ -1151,47 +1181,6 @@ QWidget *RoadBuilderPage::build_texture_group()
 
 	return group;
 }
-
-namespace
-{
-
-// A label that shows as much of its text as fits, with "..." in the middle.
-class ElidedLabel : public QLabel
-{
-public:
-	ElidedLabel()
-	{
-		setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-		setMinimumWidth(40);
-	}
-
-	void setFullText(const QString &text)
-	{
-		if (full_text_ == text)
-			return;
-		full_text_ = text;
-		updateGeometry();
-		update();
-	}
-
-	QSize sizeHint() const override
-	{
-		return QSize(fontMetrics().horizontalAdvance(full_text_), fontMetrics().height());
-	}
-
-protected:
-	void paintEvent(QPaintEvent *) override
-	{
-		QPainter painter(this);
-		painter.setPen(palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled, foregroundRole()));
-		painter.drawText(rect(), Qt::AlignLeft | Qt::AlignVCenter, fontMetrics().elidedText(full_text_, Qt::ElideMiddle, width()));
-	}
-
-private:
-	QString full_text_;
-};
-
-} // namespace
 
 QWidget *RoadBuilderPage::build_bend_block()
 {
@@ -1265,6 +1254,7 @@ QWidget *RoadBuilderPage::build_bend_block()
 	QPushButton *add_button = new QPushButton(uiText("Add Selected Assets", "Добавить выбранные ассеты"));
 	add_button->setIcon(editor_icon(":/images/mods/icon_object_mode.png"));
 	add_button->setIconSize(BUTTON_ICON_SIZE);
+	add_button->setMinimumHeight(BUTTON_HEIGHT);
 	add_button->setToolTip(loc_.tip(
 		"Add the assets selected in the Asset Browser to the end of the list: .mesh, .node or "
 		"imported models (.fbx ...). All the objects of an asset are bent together, with their "
@@ -1284,6 +1274,7 @@ QWidget *RoadBuilderPage::build_bend_block()
 	bend_clear_button_ = new QPushButton(uiText("Clear", "Очистить"));
 	bend_clear_button_->setIcon(editor_icon(":/images/icon_delete_trash.png"));
 	bend_clear_button_->setIconSize(BUTTON_ICON_SIZE);
+	bend_clear_button_->setMinimumHeight(BUTTON_HEIGHT);
 	bend_clear_button_->setToolTip(loc_.tip("Remove all the meshes from the list.", "Убрать все меши из списка."));
 	buttons->addWidget(bend_clear_button_);
 	block_layout->addLayout(buttons);
@@ -1374,10 +1365,6 @@ void RoadBuilderPage::refresh_bend_list()
 			bend_list_->addWidget(length_caption, 0, 9);
 		}
 
-		QIcon go_to_asset_icon = findEditorIcon(QString::fromUtf8("icon_go_to_asset.png"));
-		if (go_to_asset_icon.isNull())
-			go_to_asset_icon = editor_icon(":/images/assets/search.png");
-
 		QVector<QWidget *> narrow_fields;
 		for (int i = 0; i < parts.size(); ++i)
 		{
@@ -1388,24 +1375,30 @@ void RoadBuilderPage::refresh_bend_list()
 			number->setEnabled(false);
 			bend_list_->addWidget(number, r, 0);
 
-			ElidedLabel *name = new ElidedLabel;
-			name->setFullText(parts[i].source_name);
-			name->setToolTip(parts[i].source_name);
-			bend_list_->addWidget(name, r, 1);
-
-			QToolButton *show = new QToolButton;
-			show->setIcon(go_to_asset_icon);
-			show->setIconSize(QSize(14, 14));
-			show->setFixedSize(20, 20);
-			show->setAutoRaise(true);
-			show->setFocusPolicy(Qt::NoFocus);
-			show->setToolTip(loc_.tip("Show this asset in the Asset Browser.", "Показать этот ассет в Asset Browser."));
-			bend_list_->addWidget(show, r, 2);
-			connect(show, &QToolButton::clicked, this, [this, i]() {
+			// The asset field of the editor: another mesh is picked in the dialog or dropped
+			// onto it.
+			AssetField::Options name_options;
+			name_options.tooltip = parts[i].source_name;
+			name_options.dialog_title = uiText("Mesh to bend", "Меш для изгиба");
+			name_options.icon = QString::fromUtf8(":/images/mods/icon_object_mode.png");
+			name_options.show_tooltip = loc_.tip("Show this asset in the Asset Browser.", "Показать этот ассет в Asset Browser.");
+			AssetField *name = new AssetField(name_options);
+			name->setValue(parts[i].source_name, true);
+			name->setIcon(kindIcon(PlaceableAsset::Kind(parts[i].source_kind)));
+			name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+			bend_list_->addWidget(name, r, 1, 1, 2);
+			// Later: the row goes away with the list.
+			name->on_picked = [this, i](const Unigine::Vector<Unigine::UGUID> &guids) {
+				QTimer::singleShot(0, this, [this, i, guids]() {
+					builder_->replaceBendPart(i, guids);
+					refresh();
+				});
+			};
+			name->on_show = [this, i]() {
 				message_ = builder_->showBendPart(i) ? QString()
 					: uiText("The asset is not found in the project.", "Ассет не найден в проекте.");
 				refresh();
-			});
+			};
 
 			row.role = new QComboBox;
 			row.role->addItem(uiText("Pattern", "Паттерн"), int(ROAD_BEND_PATTERN));
@@ -1685,10 +1678,11 @@ QWidget *RoadBuilderPage::build_output_group()
 	}), row, 5);
 	++row;
 
-	// The rows of a decal: a label, a field and a reset button each.
-	// Two in a row: 'side' 0 - the left half, 1 - the right one, which ends the row.
-	const auto add_decal_row = [&](int side, const QString &label_text, QDoubleSpinBox *field, const QString &tooltip,
-		const std::function<void()> &reset) {
+	// The rows of the settings: a label, a field and a reset button each, two in a row:
+	// 'side' 0 - the left half, 1 - the right one, which ends the row. 'group' - the
+	// widgets shown only for one kind of the road.
+	const auto add_pair_row = [&](int side, const QString &label_text, QDoubleSpinBox *field, const QString &tooltip,
+		const std::function<void()> &reset, QVector<QWidget *> *group) {
 		QLabel *label = new QLabel(label_text);
 		label->setToolTip(tooltip);
 		if (side == 1)
@@ -1697,57 +1691,54 @@ QWidget *RoadBuilderPage::build_output_group()
 		layout->addWidget(field, row, side * 3 + 1);
 		QToolButton *reset_button = makeResetButton(reset_tooltip, this, reset);
 		layout->addWidget(reset_button, row, side * 3 + 2);
-		decal_rows_ << label << field << reset_button;
+		if (group)
+			*group << label << field << reset_button;
 		if (side == 1)
 			++row;
 	};
 
-	const QString lift_tooltip = loc_.tip(
-		"How high above the ground the decal mesh is put, in units. A decal is projected "
-		"only down from its mesh: the ground that bulges above the mesh between its "
-		"vertices would get no road, a small lift covers that. Too high - the road also "
-		"falls on what stands on the ground that low (kerbs, stones).",
-		"На сколько меш декали приподнят над землёй, в юнитах. Декаль проецируется только "
-		"вниз от своего меша: земля, выпирающая над мешем между вершинами, не получила бы "
-		"дорогу - небольшой подъём это закрывает. Слишком высоко - дорога ляжет и на то, "
-		"что стоит на земле такой высоты (бордюры, камни).");
-	decal_lift_ = make_spin_box(0.0, 100.0, 0.05, 2, lift_tooltip);
-	add_decal_row(0, uiText("Lift Above Ground", "Подъём над землёй"), decal_lift_, lift_tooltip,
-		[this, defaults]() { decal_lift_->setValue(defaults.decal_lift); });
-
+	// The distances, for every kind of the road.
 	const QString visible_tooltip = loc_.tip(
-		"From what distance to the camera the decal starts to fade out, in units "
-		"(Max Visible Distance of the decal). inf (or 0) - it is always seen. The decals "
-		"get it at once.",
-		"С какого расстояния до камеры декаль начинает исчезать, в юнитах (Max Visible "
-		"Distance декали). inf (или 0) - видна всегда. Декали получают значение сразу.");
+		"From what distance to the camera the road starts to fade out, in units (Max Visible "
+		"Distance). inf - always seen. A bent mesh keeps the LOD distances of its asset within it. "
+		"The pieces get it at once.",
+		"С какого расстояния до камеры дорога начинает исчезать, в юнитах (Max Visible Distance). "
+		"inf - видна всегда. Изогнутый меш сохраняет внутри неё дистанции LOD своего ассета. Куски "
+		"получают значение сразу.");
 	decal_visible_distance_ = make_spin_box(0.0, 1000000.0, 10.0, 1, visible_tooltip);
 	// No limit is written "inf", the way the editor shows it; "inf" can be typed too.
 	decal_visible_distance_->setSpecialValueText(QString::fromUtf8("inf"));
-	add_decal_row(1, uiText("Visible Distance", "Видна до"), decal_visible_distance_, visible_tooltip,
-		[this, defaults]() { decal_visible_distance_->setValue(defaults.decal_visible_distance); });
-
-	const QString depth_tooltip = loc_.tip(
-		"How deep the decal is projected down from its mesh, in units: the ground may go "
-		"that far below the mesh and still get the road. Too deep - the road also falls "
-		"on what is under the ground (caves, tunnels). The decals get it at once.",
-		"На какую глубину декаль проецируется вниз от своего меша, в юнитах: земля может "
-		"уходить настолько ниже меша и всё равно получит дорогу. Слишком глубоко - дорога "
-		"ляжет и на то, что под землёй (пещеры, тоннели). Декали получают значение сразу.");
-	decal_depth_ = make_spin_box(0.01, 1000.0, 0.1, 2, depth_tooltip);
-	add_decal_row(0, uiText("Projection Depth", "Глубина проекции"), decal_depth_, depth_tooltip,
-		[this, defaults]() { decal_depth_->setValue(defaults.decal_depth); });
+	add_pair_row(0, uiText("Visible Distance", "Видна до"), decal_visible_distance_, visible_tooltip,
+		[this, defaults]() { decal_visible_distance_->setValue(defaults.decal_visible_distance); }, nullptr);
 
 	const QString fade_tooltip = loc_.tip(
-		"Over what distance after Visible Distance the decal fades out smoothly, in units "
-		"(Max Fade Distance of the decal). 0 - it disappears at once. The decals get it "
-		"at once.",
-		"На каком расстоянии после [[Visible Distance|«Видна до»]] декаль плавно исчезает, в "
-		"юнитах (Max Fade Distance декали). 0 - пропадает сразу. Декали получают значение "
-		"сразу.");
+		"Over what distance after Visible Distance the road fades out smoothly, in units (Max Fade "
+		"Distance). 0 - it disappears at once. The pieces get it at once.",
+		"На каком расстоянии после [[Visible Distance|«Видна до»]] дорога плавно исчезает, в юнитах "
+		"(Max Fade Distance). 0 - пропадает сразу. Куски получают значение сразу.");
 	decal_fade_distance_ = make_spin_box(0.0, 1000000.0, 5.0, 1, fade_tooltip);
-	add_decal_row(1, uiText("Fade Distance", "Затухание"), decal_fade_distance_, fade_tooltip,
-		[this, defaults]() { decal_fade_distance_->setValue(defaults.decal_fade_distance); });
+	add_pair_row(1, uiText("Fade Distance", "Затухание"), decal_fade_distance_, fade_tooltip,
+		[this, defaults]() { decal_fade_distance_->setValue(defaults.decal_fade_distance); }, nullptr);
+
+	// What only a decal has.
+	const QString lift_tooltip = loc_.tip(
+		"How high above the ground the decal mesh is put, in units: the ground that bulges above "
+		"the mesh between its vertices still gets the road. Too high - it falls on kerbs and stones "
+		"too.",
+		"На сколько меш декали приподнят над землёй, в юнитах: земля, выпирающая над мешем между "
+		"вершинами, всё равно получает дорогу. Слишком высоко - дорога ляжет и на бордюры и камни.");
+	decal_lift_ = make_spin_box(0.0, 100.0, 0.05, 2, lift_tooltip);
+	add_pair_row(0, uiText("Lift Above Ground", "Подъём над землёй"), decal_lift_, lift_tooltip,
+		[this, defaults]() { decal_lift_->setValue(defaults.decal_lift); }, &decal_rows_);
+
+	const QString depth_tooltip = loc_.tip(
+		"How deep the decal is projected down from its mesh, in units. Too deep - the road also "
+		"falls on what is under the ground. The decals get it at once.",
+		"На какую глубину декаль проецируется вниз от своего меша, в юнитах. Слишком глубоко - "
+		"дорога ляжет и на то, что под землёй. Декали получают значение сразу.");
+	decal_depth_ = make_spin_box(0.01, 1000.0, 0.1, 2, depth_tooltip);
+	add_pair_row(1, uiText("Projection Depth", "Глубина проекции"), decal_depth_, depth_tooltip,
+		[this, defaults]() { decal_depth_->setValue(defaults.decal_depth); }, &decal_rows_);
 
 	// The meshes of a bent road, in a block of their own.
 	QWidget *bend_block = build_bend_block();
@@ -1756,117 +1747,71 @@ QWidget *RoadBuilderPage::build_output_group()
 	++row;
 
 	const QString material_tooltip = loc_.tip(
-		"The material of the road. Select a material in the Asset Browser and press the "
-		"button: the pieces of the road get it at once, no Generate is needed. Without one "
-		"the road gets the base material (mesh_base or decal_base).\n"
-		"A decal needs a decal material (decal_base, its children or a decal Material "
-		"Graph), a mesh - a mesh one.\n"
-		"A material given to the pieces by hand in the Parameters window stays too: "
-		"Generate keeps the pieces and changes only their geometry.",
-		"Материал дороги. Выберите материал в Asset Browser и нажмите кнопку: куски дороги "
-		"получат его сразу, генерировать заново не нужно. Без него дорога получает базовый "
-		"материал (mesh_base или decal_base).\n"
-		"Декали нужен материал декали (decal_base, его наследники или Material Graph для "
-		"декали), мешу - материал меша.\n"
-		"Материал, назначенный кускам вручную в окне Parameters, тоже сохраняется: "
-		"«Сгенерировать» оставляет куски и меняет только их геометрию.");
+		"The material of the road: pick it with the folder button or drag it here from the Asset "
+		"Browser. The pieces get it at once. A decal needs a decal material, a mesh - a mesh one.",
+		"Материал дороги: выберите кнопкой с папкой или перетащите сюда из Asset Browser. Куски "
+		"получают его сразу. Декали нужен материал декали, мешу - материал меша.");
 	QLabel *material_title = new QLabel(uiText("Material", "Материал"));
 	material_rows_ << material_title;
 	material_title->setToolTip(material_tooltip);
 	layout->addWidget(material_title, row, 0);
-	QHBoxLayout *material_layout = new QHBoxLayout;
-	material_layout->setSpacing(3);
-	material_label_ = new QLabel;
-	material_label_->setToolTip(material_tooltip);
-	material_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-	material_layout->addWidget(material_label_, 1);
-	QToolButton *material_take = new QToolButton;
-	material_take->setIcon(editor_icon(":/images/assets/file_material.png"));
-	material_take->setIconSize(BUTTON_ICON_SIZE);
-	material_take->setText(uiText("From Asset Browser", "Из Asset Browser"));
-	material_take->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-	material_take->setFocusPolicy(Qt::NoFocus);
-	material_take->setToolTip(material_tooltip);
-	material_layout->addWidget(material_take);
-	material_clear_ = new QToolButton;
-	material_clear_->setText(QString::fromUtf8("✕"));
-	material_clear_->setFixedSize(20, 22);
-	material_clear_->setAutoRaise(true);
-	material_clear_->setFocusPolicy(Qt::NoFocus);
-	material_clear_->setToolTip(loc_.tip("Back to the base material.", "Вернуть базовый материал."));
-	material_layout->addWidget(material_clear_);
-	QWidget *material_row = new QWidget;
-	material_layout->setContentsMargins(0, 0, 0, 0);
-	material_row->setLayout(material_layout);
-	material_rows_ << material_row;
-	layout->addWidget(material_row, row, 1, 1, 5);
+	AssetField::Options material_options;
+	material_options.tooltip = material_tooltip;
+	material_options.dialog_title = uiText("Material of the road", "Материал дороги");
+	material_options.filter = QString::fromUtf8(".mat");
+	material_options.icon = QString::fromUtf8(":/images/assets/file_material.png");
+	material_options.reset_tooltip = loc_.tip("Back to the base material.", "Вернуть базовый материал.");
+	material_options.show_tooltip = loc_.tip("Show the material in the Asset Browser.", "Показать материал в Asset Browser.");
+	material_options.take_text = uiText("Use Selected", "Взять выделенный");
+	material_options.take_tooltip = loc_.tip("Take the material selected in the Asset Browser.",
+		"Взять материал, выделенный в Asset Browser.");
+	material_field_ = new AssetField(material_options);
+	material_rows_ << material_field_;
+	layout->addWidget(material_field_, row, 1, 1, 5);
+	material_field_->on_picked = [this](const Unigine::Vector<Unigine::UGUID> &guids) {
+		message_.clear();
+		builder_->takeMaterial(guids);
+	};
+	material_field_->on_show = [this]() { builder_->showMaterial(); };
+	material_field_->on_reset = [this]() {
+		message_.clear();
+		builder_->clearMaterial();
+	};
 	++row;
 
 	const QString folder_tooltip = loc_.tip(
-		"The folder of the project the meshes of the road are saved to. By default it is "
-		"\"roads\" next to the world. Every road names its files after itself: <road>_00.mesh, "
-		"<road>_01.mesh...",
-		"Папка проекта, куда сохраняются меши дороги. По умолчанию - «roads» рядом с миром. "
-		"Файлы называются по имени дороги: <дорога>_00.mesh, <дорога>_01.mesh...");
+		"The folder of the project the meshes of the road are saved to, \"roads\" next to the world "
+		"by default. The files are named after the road: <road>_00.mesh...",
+		"Папка проекта, куда сохраняются меши дороги, по умолчанию «roads» рядом с миром. Файлы "
+		"называются по имени дороги: <дорога>_00.mesh...");
 	QLabel *folder_title = new QLabel(uiText("Folder", "Папка"));
 	folder_title->setToolTip(folder_tooltip);
 	layout->addWidget(folder_title, row, 0);
-	QHBoxLayout *folder_layout = new QHBoxLayout;
-	folder_layout->setSpacing(3);
-	folder_label_ = new QLabel;
-	folder_label_->setToolTip(folder_tooltip);
-	folder_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-	folder_layout->addWidget(folder_label_, 1);
-	// The magnifier the editor has on its own asset fields ("go to asset").
-	folder_show_ = new QToolButton;
-	QIcon go_to_asset_icon = findEditorIcon(QString::fromUtf8("icon_go_to_asset.png"));
-	if (go_to_asset_icon.isNull())
-		go_to_asset_icon = editor_icon(":/images/assets/search.png");
-	folder_show_->setIcon(go_to_asset_icon);
-	folder_show_->setIconSize(QSize(14, 14));
-	folder_show_->setFixedSize(20, 22);
-	folder_show_->setAutoRaise(true);
-	folder_show_->setFocusPolicy(Qt::NoFocus);
-	folder_show_->setToolTip(loc_.tip(
-		"Show the generated meshes of the road in the Asset Browser: it opens their folder "
-		"and selects the first one.",
-		"Показать сгенерированные меши дороги в Asset Browser: откроется их папка, первый "
-		"меш будет выделен."));
-	folder_layout->addWidget(folder_show_);
-	connect(folder_show_, &QToolButton::clicked, this, [this]() {
+	AssetField::Options folder_options;
+	folder_options.tooltip = folder_tooltip;
+	folder_options.dialog_title = uiText("Folder for the meshes of the road", "Папка для мешей дороги");
+	folder_options.icon = QString::fromUtf8(":/images/assets/folder.png");
+	folder_options.reset_tooltip = loc_.tip("Back to the default folder.", "Вернуть папку по умолчанию.");
+	folder_options.show_tooltip = loc_.tip("Show the generated meshes of the road in the Asset Browser.",
+		"Показать сгенерированные меши дороги в Asset Browser.");
+	folder_field_ = new AssetField(folder_options);
+	layout->addWidget(folder_field_, row, 1, 1, 5);
+	folder_field_->on_browse = [this]() { browse_folder(); };
+	folder_field_->on_show = [this]() {
 		message_ = builder_->showGeneratedFiles() ? QString()
 			: uiText("The generated meshes are not found in the project.", "Сгенерированные меши не найдены в проекте.");
 		refresh();
-	});
-	QToolButton *folder_browse = new QToolButton;
-	folder_browse->setIcon(editor_icon(":/images/assets/folder.png"));
-	folder_browse->setIconSize(BUTTON_ICON_SIZE);
-	folder_browse->setText(uiText("Choose...", "Выбрать..."));
-	folder_browse->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-	folder_browse->setFocusPolicy(Qt::NoFocus);
-	folder_browse->setToolTip(folder_tooltip);
-	folder_layout->addWidget(folder_browse);
-	folder_reset_ = makeResetButton(loc_.tip("Back to the default folder.", "Вернуть папку по умолчанию."), this, [this]() {
+	};
+	folder_field_->on_reset = [this]() {
 		RoadSettings settings = builder_->getSettings();
 		settings.folder.clear();
 		builder_->setSettings(settings);
-	});
-	folder_layout->addWidget(folder_reset_);
-	layout->addLayout(folder_layout, row, 1, 1, 5);
+	};
 	++row;
 
 	connect(output_, &QButtonGroup::idClicked, this, [this](int) { apply_settings(); });
 	for (QDoubleSpinBox *box : {decal_depth_, decal_lift_, decal_visible_distance_, decal_fade_distance_, piece_length_})
 		connect(box, &QDoubleSpinBox::valueChanged, this, [this](double) { apply_settings(); });
-	connect(material_take, &QToolButton::clicked, this, [this]() {
-		message_.clear();
-		builder_->takeSelectedMaterial();
-	});
-	connect(material_clear_, &QToolButton::clicked, this, [this]() {
-		message_.clear();
-		builder_->clearMaterial();
-	});
-	connect(folder_browse, &QToolButton::clicked, this, [this]() { browse_folder(); });
 
 	return group;
 }
@@ -2017,6 +1962,7 @@ void RoadBuilderPage::refresh()
 	if (QAbstractButton *button = bend_up_->button(settings.bend_up))
 		button->setChecked(true);
 	bend_merge_->setChecked(settings.bend_merge_materials);
+	show_value(bend_mesh_angle_, settings.bend_mesh_angle);
 	refresh_bend_list();
 	add_points_button_->setChecked(builder_->isAddingPoints());
 	updating_ = false;
@@ -2040,15 +1986,12 @@ void RoadBuilderPage::refresh()
 		has_pattern = has_pattern || part.role == ROAD_BEND_PATTERN;
 
 	const QString material = builder_->getMaterialName();
-	material_label_->setText(material.isEmpty()
-		? (decal ? QString::fromUtf8("decal_base") : QString::fromUtf8("mesh_base")) : material);
-	material_label_->setEnabled(!material.isEmpty());
-	material_clear_->setEnabled(!material.isEmpty());
+	material_field_->setValue(material.isEmpty()
+		? (decal ? QString::fromUtf8("decal_base") : QString::fromUtf8("mesh_base")) : material, !material.isEmpty());
+	material_field_->setShowEnabled(!settings.material.isEmpty());
 
-	folder_label_->setText(builder_->getFolder());
-	folder_label_->setEnabled(!settings.folder.isEmpty());
-	folder_reset_->setEnabled(!settings.folder.isEmpty());
-	folder_show_->setEnabled(builder_->hasGeneratedFiles());
+	folder_field_->setValue(builder_->getFolder(), !settings.folder.isEmpty());
+	folder_field_->setShowEnabled(builder_->hasGeneratedFiles());
 
 	if (has_road)
 	{

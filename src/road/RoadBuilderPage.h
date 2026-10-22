@@ -22,6 +22,7 @@ class QToolButton;
 namespace ArtistTool
 {
 
+class AssetField;
 class SurfaceFilterButton;
 
 // "Road" tool page: the current road (create, add points, smooth / corner points,
@@ -146,8 +147,7 @@ private:
 	QDoubleSpinBox *decal_visible_distance_{nullptr};
 	QDoubleSpinBox *decal_fade_distance_{nullptr};
 	QDoubleSpinBox *piece_length_{nullptr};
-	QLabel *material_label_{nullptr};
-	QToolButton *material_clear_{nullptr};
+	AssetField *material_field_{nullptr};
 	// The rows of the material, hidden for a bent mesh: it has the materials of its asset.
 	QVector<QWidget *> material_rows_;
 	// The bent mesh: its rows, shown only for it.
@@ -155,6 +155,7 @@ private:
 	QButtonGroup *bend_forward_{nullptr};
 	QButtonGroup *bend_up_{nullptr};
 	QCheckBox *bend_merge_{nullptr};
+	QDoubleSpinBox *bend_mesh_angle_{nullptr};
 	// The list of the bent meshes, a row per mesh: its fields are filled from the
 	// settings; the rows are made anew only when the list itself changes.
 	struct BendPartRow
@@ -173,9 +174,7 @@ private:
 	// What only a road of a grid has (its shape, its texture, its colors, the ground
 	// under it): hidden for a bent mesh, which follows the curve itself.
 	QVector<QWidget *> grid_only_widgets_;
-	QLabel *folder_label_{nullptr};
-	QToolButton *folder_reset_{nullptr};
-	QToolButton *folder_show_{nullptr};
+	AssetField *folder_field_{nullptr};
 
 	// What is drawn over the road in the viewport (RoadView).
 	QComboBox *view_{nullptr};

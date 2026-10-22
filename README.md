@@ -1,6 +1,6 @@
 # Artist Tools for UNIGINE
 
-Tools for everyday level work in the **UNIGINE 2.22 Editor**: place props on surfaces, build fences and roads along curves, check distances, and turn clutter into editable objects. Everything lives in one dockable window: **Windows → Artist Tools**.
+Tools for everyday level work in the **UNIGINE 2.22 Editor**: place props, build fences and roads, hang wires between poles, check dimensions, unpack clutter, and bake textures for simpler meshes. Everything lives in one dockable window: **Windows → Artist Tools**.
 
 [UNIGINE Store](https://store.unigine.com/en/publisher/1ee19a48-e62a-6d86-8136-9d637c69bc0c) · [Video overview](https://www.youtube.com/watch?v=lC9pwmAlltY) · [Build from source](docs/BUILDING.md)
 
@@ -13,8 +13,10 @@ Tools for everyday level work in the **UNIGINE 2.22 Editor**: place props on sur
 | **Object Placer** | Place props with a click, align them to a surface, and vary their rotation and scale. |
 | **Path Placer** | Arrange fences, posts, and other repeating objects along an editable curve. |
 | **Road** | Make roads and paths as meshes or decals, or bend existing meshes along a curve. |
+| **Wires** | Place poles along a line or connect existing ones, then generate sagging wires, cables, or chains. |
 | **Measure** | Check distances, slopes, and angles, or place a person-shaped height reference. |
 | **Unpack Clutter** | Convert World Clutter, Mesh Clutter, and Mesh Cluster into regular nodes you can edit individually. |
+| **Baker** | Bake albedo, shading, normals, and optional emission from detailed models onto a low-poly UV layout. |
 
 The interface supports English and Russian and follows the editor's language settings. Hover over a control for help; shortcuts are listed at the bottom of each tab.
 
@@ -42,8 +44,6 @@ Enable **Normal Orientation** to follow the surface, or randomize rotation and s
 
 ![Props placed around a curved surface and aligned to its normals with Object Placer](docs/images/object-placer.png)
 
-*Screenshots and the video overview are from the Store release 1.0.3; the source here also includes Road and Measure.*
-
 ### Build a fence or a row of objects
 
 1. In **Path Placer**, click **New Path** and click surfaces to add points. Press **Esc** to finish.
@@ -58,17 +58,33 @@ In **Road**, click **New Road**, place points, and press **Esc**. Set the width,
 
 Use per-point width and roll for widening sections and banked turns. Ground snapping follows the terrain; **On Curve** points let you make bridges and ramps. Generated meshes are saved to `roads/` beside the world, or to a folder you choose.
 
+Use a mesh material for **Mesh** and a decal material for **Decal**. Vertex-color controls provide masks for your material, and the viewport preview lets you inspect them. **Bent Mesh** supports repeating assets with separate start and end pieces.
+
+### Hang wires between poles
+
+In **Wires**, click **New Line** and place points. Add pole assets and choose **At Points** or **Every** to control their spacing. Put dummy nodes named `wire_1`, `wire_2`, and so on inside each pole asset to mark attachment positions.
+
+Set **Sag** and **Random**, then choose **Cross**, **Ribbon**, **Tube**, or **Mesh** under **Make Of**. Adjust individual spans with **Sag ×** and **Twist +**. **Above Ground** keeps the wire above the sampled ground; **Connect Poles** lets you add existing poles with **Add Poles**. Click **Generate** to save the result.
+
 ### Check scale and dimensions
 
 In **Measure**, choose **Ruler**, **Angle**, or **Person**, then click in the viewport to place the points. You can snap to surfaces and mesh vertices, lock to an axis with **X / Y / Z**, and copy measurements as text.
+
+Tap and release **Ctrl** over the viewport to switch surface/vertex snapping. **Shift + X / Y / Z** locks to a plane; hold **Shift** while placing or dragging a point for slower cursor movement. In Person mode, the mouse wheel adjusts the figure's height.
 
 ### Turn clutter into editable nodes
 
 Select clutter or cluster nodes in the World Hierarchy, choose whether to disable, keep, or delete the originals, then click **Unpack**. The resulting objects are regular nodes. **Ctrl+Z** undoes the unpacking.
 
+### Bake textures for a low-poly model
+
+Open **Baker** and add the high-poly and low-poly nodes in the **Models** tab. Prepare a unique low-poly UV0 layout, choose the output maps and resolution, set the frontal/rear cage distances, then click **Bake**. Textures are saved beside the low-poly mesh asset, and its material is created or updated.
+
+Use **As rendered** for layered materials and material graphs. **Groups** separates matching parts; **Fit cage** adjusts projection distances per part. Disable maps you want to keep when re-baking.
+
 ## A few useful details
 
-- Paths and roads keep their settings in the world; tool preferences are saved per project.
+- Paths, roads, and wire lines keep their settings in the world; tool preferences are saved per project.
 - Created nodes reference assets by GUID, so moving or renaming assets keeps those references intact.
 - **Ctrl+Shift+F** finds the selected node's source asset in the Asset Browser. You can change this shortcut in the editor's hotkey settings under **Artist Tools**.
 - When the editor's **Snap to Surface** is enabled, it handles path-point movement.

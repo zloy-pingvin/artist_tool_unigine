@@ -1,4 +1,5 @@
 #include "PathPlacerPage.h"
+#include "AssetField.h"
 #include "SurfaceFilterButton.h"
 #include "UiHelpers.h"
 
@@ -801,7 +802,7 @@ QWidget *PathPlacerPage::build_objects_group()
 		connect(check, &QCheckBox::toggled, this, [this](bool) { apply_settings(); });
 	connect(live_update_, &QCheckBox::toggled, this, [this](bool checked) { placer_->setLiveUpdate(checked); });
 	connect(rearrange_button_, &QPushButton::clicked, this, [this]() {
-		placer_->rearrange();
+		placer_->rearrange(true);
 		refresh();
 	});
 
@@ -1094,37 +1095,6 @@ const int MAX_VISIBLE_PATHS = 4;
 // A fill that makes more objects than this asks first.
 const int FILL_WARNING_COUNT = 500;
 
-// A caption that takes the room its row has left: when it does not fit, it is cut in
-// the middle with "..." instead of pushing the row wider. The start and the end of an
-// asset name are what tells the assets of one set apart.
-class ElidedLabel : public QLabel
-{
-public:
-	explicit ElidedLabel(const QString &text)
-		: full_text_(text)
-	{
-		setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-		setMinimumWidth(40);
-	}
-
-	QSize sizeHint() const override
-	{
-		return QSize(fontMetrics().horizontalAdvance(full_text_), fontMetrics().height());
-	}
-
-protected:
-	void paintEvent(QPaintEvent *) override
-	{
-		QPainter painter(this);
-		painter.setPen(palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled, foregroundRole()));
-		painter.drawText(rect(), Qt::AlignLeft | Qt::AlignVCenter,
-			fontMetrics().elidedText(full_text_, Qt::ElideMiddle, width()));
-	}
-
-private:
-	QString full_text_;
-};
-
 QString path_item_text(const QString &name, int points, int objects)
 {
 	return uiText("%1  -  %2 points, %3 objects", "%1  -  точек: %2, объектов: %3")
@@ -1222,8 +1192,28 @@ void PathPlacerPage::refresh_pattern()
 	for (const PathPatternItem &item : pattern)
 		signature += QString::fromUtf8(item.asset.path.get()) + QLatin1Char('|') + QString::number(int(item.role)) + QLatin1Char('|');
 	if (signature == pattern_signature_)
+	{
+		// The same rows: their counts and lengths may have changed under them (Ctrl+Z).
+		for (int i = 0; i < pattern.size() && i < pattern_counts_.size(); ++i)
+		{
+			QSpinBox *count = pattern_counts_[i];
+			if (count && !count->hasFocus() && count->value() != pattern[i].count)
+			{
+				const QSignalBlocker blocker(count);
+				count->setValue(pattern[i].count);
+			}
+			QDoubleSpinBox *length = pattern_lengths_[i];
+			if (length && !length->hasFocus() && std::abs(length->value() - double(pattern[i].length)) > 1e-6)
+			{
+				const QSignalBlocker blocker(length);
+				length->setValue(pattern[i].length);
+			}
+		}
 		return;
+	}
 	pattern_signature_ = signature;
+	pattern_counts_.clear();
+	pattern_lengths_.clear();
 
 	while (QLayoutItem *item = pattern_rows_->takeAt(0))
 	{
@@ -1269,11 +1259,6 @@ void PathPlacerPage::refresh_pattern()
 
 	QVector<QWidget *> narrow_fields;
 
-	// The magnifier the editor has on its own asset fields ("go to asset").
-	QIcon go_to_asset_icon = findEditorIcon(QString::fromUtf8("icon_go_to_asset.png"));
-	if (go_to_asset_icon.isNull())
-		go_to_asset_icon = editor_icon(":/images/assets/search.png");
-
 	for (int i = 0; i < pattern.size(); ++i)
 	{
 		QWidget *row = new QWidget;
@@ -1288,26 +1273,33 @@ void PathPlacerPage::refresh_pattern()
 		number->setEnabled(false);
 		row_layout->addWidget(number);
 
-		QLabel *name = new ElidedLabel(QFileInfo(pattern[i].asset.name).completeBaseName());
-		name->setToolTip(QString::fromUtf8("%1 (%2)").arg(pattern[i].asset.name, kindLabel(pattern[i].asset.kind)));
+		// The asset field of the editor: another asset is picked in the dialog or dropped
+		// onto it.
+		AssetField::Options name_options;
+		name_options.tooltip = QString::fromUtf8("%1 (%2)").arg(pattern[i].asset.name, kindLabel(pattern[i].asset.kind));
+		name_options.dialog_title = uiText("Asset of the pattern", "Ассет паттерна");
+		name_options.icon = QString::fromUtf8(":/images/mods/icon_object_mode.png");
+		name_options.show_tooltip = loc_.tip("Show this asset in the Asset Browser.", "Показать этот ассет в Asset Browser.");
+		AssetField *name = new AssetField(name_options);
+		name->setValue(QFileInfo(pattern[i].asset.name).completeBaseName(), true);
+		name->setIcon(kindIcon(pattern[i].asset.kind));
+		name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 		row_layout->addWidget(name, 1);
-
-		QToolButton *show = new QToolButton;
-		show->setIcon(go_to_asset_icon);
-		show->setIconSize(QSize(14, 14));
-		show->setFixedSize(20, 20);
-		show->setAutoRaise(true);
-		show->setFocusPolicy(Qt::NoFocus);
-		show->setToolTip(loc_.tip("Show this asset in the Asset Browser.", "Показать этот ассет в Asset Browser."));
-		row_layout->addWidget(show);
-		connect(show, &QToolButton::clicked, this, [this, i]() {
+		// Later: the row goes away with the list.
+		name->on_picked = [this, i](const Unigine::Vector<Unigine::UGUID> &guids) {
+			QTimer::singleShot(0, this, [this, i, guids]() {
+				placer_->replacePatternAsset(i, guids);
+				refresh();
+			});
+		};
+		name->on_show = [this, i]() {
 			const QVector<PathPatternItem> &items = placer_->getPattern();
 			if (i >= items.size())
 				return;
 			message_ = showInAssetBrowser(items[i].asset) ? QString()
 				: uiText("The asset is not found in the project.", "Ассет не найден в проекте.");
 			refresh();
-		});
+		};
 
 		QComboBox *role = new QComboBox;
 		role->addItem(uiText("Pattern", "Паттерн"), int(PATH_PATTERN_REPEAT));
@@ -1333,6 +1325,7 @@ void PathPlacerPage::refresh_pattern()
 		QSpinBox *count = new QSpinBox;
 		count->setRange(1, 999);
 		count->setValue(pattern[i].count);
+		pattern_counts_.append(count);
 		// The start and the end are placed once.
 		count->setEnabled(pattern[i].role == PATH_PATTERN_REPEAT);
 		// The style of the editor gives number fields a width of its own, which beats a
@@ -1351,6 +1344,7 @@ void PathPlacerPage::refresh_pattern()
 
 		QDoubleSpinBox *length = make_spin_box(0.0, 100000.0, 0.1, 3, length_tooltip);
 		length->setValue(pattern[i].length);
+		pattern_lengths_.append(length);
 		length->setProperty(FIXED_WIDTH_PROPERTY, 58);
 		narrow_fields.append(length);
 		row_layout->addWidget(length);

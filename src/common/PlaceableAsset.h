@@ -5,6 +5,7 @@
 #include <UnigineString.h>
 #include <UnigineVector.h>
 
+#include <QIcon>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -60,6 +61,12 @@ QStringList siblingAssets(const Unigine::String &asset_path);
 Unigine::NodePtr createNode(const PlaceableAsset &asset);
 
 QString kindLabel(PlaceableAsset::Kind kind);
+
+// The extension of the file behind a GUID, without the dot: "mat", "mesh", ...
+QString extensionOf(const Unigine::UGUID &guid);
+// The icon of the node the asset becomes, as in the World Hierarchy: a node reference for
+// a .node, a static mesh for a .mesh and a model.
+QIcon kindIcon(PlaceableAsset::Kind kind);
 
 // Selects the asset in the editor, which makes the Asset Browser open its folder and
 // show it. False if the file of the asset is not found.

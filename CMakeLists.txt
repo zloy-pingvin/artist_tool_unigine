@@ -85,7 +85,7 @@ endif()
 # The sources are in src/, a folder per tool (road, path_placer, measure, ...), the
 # code they share in common/ and core/.
 set(src ${CMAKE_CURRENT_SOURCE_DIR}/src)
-set(source_dirs core common object_placer path_placer road measure clutter)
+set(source_dirs core common object_placer path_placer road wire measure clutter baker)
 
 add_library(${target} SHARED
 	${src}/core/${target}.cpp
@@ -98,6 +98,18 @@ add_library(${target} SHARED
 	${src}/core/UiHelpers.h
 	${src}/core/UndoActions.cpp
 	${src}/core/UndoActions.h
+	${src}/common/AssetField.cpp
+	${src}/common/AssetField.h
+	${src}/common/GeneratedFiles.cpp
+	${src}/common/GeneratedFiles.h
+	${src}/common/NodeData.cpp
+	${src}/common/NodeData.h
+	${src}/baker/BakeCore.cpp
+	${src}/baker/BakeCore.h
+	${src}/baker/BakeGpu.cpp
+	${src}/baker/BakeGpu.h
+	${src}/baker/BakerWindow.cpp
+	${src}/baker/BakerWindow.h
 	${src}/common/AssetLocator.cpp
 	${src}/common/AssetLocator.h
 	${src}/common/CurveEditor.cpp
@@ -126,6 +138,12 @@ add_library(${target} SHARED
 	${src}/road/RoadBuilder.h
 	${src}/road/RoadBuilderPage.cpp
 	${src}/road/RoadBuilderPage.h
+	${src}/wire/WireBuilder.cpp
+	${src}/wire/WireBuilder.h
+	${src}/wire/WireBuilderPage.cpp
+	${src}/wire/WireBuilderPage.h
+	${src}/wire/WireShape.cpp
+	${src}/wire/WireShape.h
 	${src}/measure/MeasurePage.cpp
 	${src}/measure/MeasurePage.h
 	${src}/measure/MeasureTool.cpp
@@ -182,6 +200,10 @@ target_compile_definitions(${target}
 	$<$<BOOL:${UNIGINE_DOUBLE}>:UNIGINE_DOUBLE>
 	$<$<BOOL:${ARTIST_TOOL_DEV_PAGES}>:ARTIST_TOOL_DEV_PAGES>
 	QT_NO_DEBUG
+	## windows.h (the free memory the baker may take): without these its min/max
+	## macros and its huge include set break Qt and std headers
+	$<$<NOT:$<BOOL:${UNIX}>>:NOMINMAX>
+	$<$<NOT:$<BOOL:${UNIX}>>:WIN32_LEAN_AND_MEAN>
 	)
 
 ## the plugin manifest is embedded by moc: reconfigure when it changes
@@ -226,6 +248,7 @@ elseif(UNIGINE_COMPILER_IS_GNU OR UNIGINE_COMPILER_IS_CLANG)
 		-m64
 		-msse4.2
 		-ffast-math
+		-fno-finite-math-only	# NaN and infinity checks (std::isnan, std::isfinite) stay.
 		-fno-strict-aliasing
 		$<$<NOT:$<CONFIG:Debug>>:-fomit-frame-pointer>
 	)

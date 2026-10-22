@@ -27,6 +27,9 @@ QString pluginIconsDir();
 // An image built into the editor, found by its file name wherever it is in the
 // editor's resources (e.g. "icon_go_to_asset.png"). A null icon if there is none.
 QIcon findEditorIcon(const QString &file_name);
+// The icon the editor shows for a type of node in the World Hierarchy ("NodeReference",
+// "ObjectMeshStatic"): core/gui/node_icons of the engine. A null icon if there is none.
+QIcon nodeTypeIcon(const char *type_name);
 
 // X - red, Y - green, Z - blue, the same as the axes in the editor.
 QString axisColor(int axis);
@@ -78,6 +81,11 @@ void enableSpinBoxDrag(QAbstractSpinBox *box);
 // those angles when it comes within 'snap' degrees of one. The keys still set any
 // angle.
 QDial *makeAngleDial(int minimum, int maximum, int major_step = 45, int snap = 4);
+
+// Whether Esc pressed now (sent to 'watched') is the tool's to stop with: not while a
+// dialog, a menu or a popup is open, nor in a field being typed into (a rename in the
+// World Hierarchy too) - Esc is theirs then.
+bool isEscapeFree(QObject *watched);
 
 // A header that folds and unfolds the widget under it, like the sections of the
 // editor's own tool windows.

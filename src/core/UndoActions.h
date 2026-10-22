@@ -172,7 +172,11 @@ public:
 	// 'before' - what the node had before it was changed; what it has now is kept for
 	// redo.
 	void add(const Unigine::NodePtr &node, const PieceState &before);
-	bool isEmpty() const { return entries_.isEmpty(); }
+	// The files the pieces got written anew, a part of this step (it owns them): undo
+	// gives the files back what they had first and then the pieces their settings, so
+	// that the surfaces of the old mesh are there to take them; redo the same way.
+	void setFiles(SetFilesAction *files);
+	bool isEmpty() const { return entries_.isEmpty() && (!files_ || files_->isEmpty()); }
 
 	// The pieces are changed already when the step is applied.
 	void apply() override {}
@@ -188,6 +192,37 @@ private:
 	};
 	void put(bool after) const;
 
+	QVector<Entry> entries_;
+	SetFilesAction *files_{nullptr};
+};
+
+// Where new nodes stand among the children of their parent (or among the root nodes of
+// the world), applied right after their CreateNodesAction in the same step: the redo of
+// that action puts every node last, and a point put between two points of a curve would
+// come back at its end.
+class SetNodeOrderAction final : public ::UnigineEditor::Action
+{
+public:
+	SetNodeOrderAction();
+	~SetNodeOrderAction() override;
+
+	// The node, where it stands now.
+	void add(const Unigine::NodePtr &node);
+	bool isEmpty() const { return entries_.isEmpty(); }
+
+	// The nodes stand there already when the step is applied; the undo of the step
+	// removes them.
+	void apply() override {}
+	void undo() override {}
+	void redo() override;
+
+private:
+	struct Entry
+	{
+		int node{0};
+		int index{0};
+		bool root{false};
+	};
 	QVector<Entry> entries_;
 };
 

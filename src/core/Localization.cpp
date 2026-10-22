@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QWidget>
 
 namespace ArtistTool
@@ -98,6 +99,30 @@ QString resolve_names(const QString &text, bool russian)
 	return result;
 }
 
+// A tooltip of plain text is shown by Qt a line per line of the text, however long: the
+// lines are broken at the spaces into ones of at most this many characters.
+const int TOOLTIP_LINE_LENGTH = 70;
+
+QString wrap_lines(const QString &text)
+{
+	QStringList lines;
+	for (const QString &paragraph : text.split(QLatin1Char('\n')))
+	{
+		QString line;
+		for (const QString &word : paragraph.split(QLatin1Char(' ')))
+		{
+			if (!line.isEmpty() && line.size() + 1 + word.size() > TOOLTIP_LINE_LENGTH)
+			{
+				lines.append(line);
+				line.clear();
+			}
+			line += (line.isEmpty() ? QString() : QString::fromUtf8(" ")) + word;
+		}
+		lines.append(line);
+	}
+	return lines.join(QLatin1Char('\n'));
+}
+
 } // namespace
 
 QString uiText(const char *en, const char *ru)
@@ -113,14 +138,15 @@ Localization::Localization()
 
 QString Localization::tip(const char *en, const char *ru) const
 {
-	if (!ru_tooltips_)
-		return QString::fromUtf8(en);
-	return resolve_names(QString::fromUtf8(ru), ru_labels_);
+	return wrap_lines(hotkeys(en, ru));
 }
 
 QString Localization::hotkeys(const char *en, const char *ru) const
 {
-	return tip(en, ru);
+	// The list of the hotkeys is a label of the page, which wraps its lines itself.
+	if (!ru_tooltips_)
+		return QString::fromUtf8(en);
+	return resolve_names(QString::fromUtf8(ru), ru_labels_);
 }
 
 } // namespace ArtistTool

@@ -148,6 +148,10 @@ struct RoadSettings
 	// per piece (a LOD level and the shadow LOD each apart), with the LOD distances and
 	// the shadows of the first mesh of the pattern that has it.
 	bool bend_merge_materials{true};
+	// The meshes are cut where the curve bends or rolls them by more than this many
+	// degrees across one of their edges: they bend smoothly, and the straight parts get no
+	// more triangles. 0 - as they are.
+	float bend_mesh_angle{0.0f};
 	// Which axis of the meshes goes along the curve and which one up.
 	AxisDirection bend_forward{AXIS_Y_POSITIVE};
 	AxisDirection bend_up{AXIS_Z_POSITIVE};
@@ -341,10 +345,12 @@ public:
 	bool getSelectedPointsWidth(double &scale) const;
 	void setSelectedPointsWidth(double scale);
 
-	// Takes the material selected in the Asset Browser for the road and gives it to
-	// its pieces right away. It must suit them: a decal material for decals, a mesh
-	// one for meshes.
-	bool takeSelectedMaterial();
+	// Takes the first material among the GUIDs (picked in the asset dialog or dropped onto
+	// the field: assets, runtimes, materials) for the road and gives it to its pieces
+	// right away. It must suit them: a decal material for decals, a mesh one for meshes.
+	bool takeMaterial(const Unigine::Vector<Unigine::UGUID> &guids);
+	// Selects the material of the road in the Asset Browser.
+	bool showMaterial() const;
 	// Back to the base material, for the pieces too.
 	void clearMaterial();
 	// The name of the material the pieces of the road have (it may have been set on
@@ -354,6 +360,9 @@ public:
 	// Adds the assets selected in the Asset Browser to the end of the meshes bent along
 	// the curve (Bent Mesh): .mesh, .node or imported models, with their materials.
 	bool addSelectedBendParts();
+	// Puts another asset into the part (picked in the asset dialog or dropped onto it); its
+	// role, count and scale stay, the length is measured again.
+	bool replaceBendPart(int part, const Unigine::Vector<Unigine::UGUID> &guids);
 	void removeBendPart(int part);
 	// Moves a mesh up (offset -1) or down (+1) the list.
 	void moveBendPart(int part, int offset);
@@ -418,8 +427,12 @@ private:
 	Unigine::NodePtr mesh_node() const;
 	bool take_material(const Unigine::MaterialPtr &material);
 	void apply_material(const Unigine::MaterialPtr &material);
-	// The projection depth and the distances of the settings, to the decal pieces.
+	// The projection depth and the distances of the settings, to the decal pieces; the
+	// distances to the mesh pieces and the preview too.
 	void apply_decal_settings();
+	// The visible and the fade distance of the settings, to the surfaces of a mesh piece
+	// (or of the preview); a bent mesh keeps the LOD distances of its asset within them.
+	void apply_distances(const Unigine::ObjectPtr &object) const;
 
 	void set_road(const Unigine::NodePtr &root);
 	// A name no road of the world has, made from 'base'.
@@ -437,7 +450,8 @@ private:
 	// 'on_ground' off: the grid is not put on the ground, which is much faster - for
 	// the frames a point is being moved in.
 	void rebuild_grid(bool on_ground = true);
-	// The height of the ground under each of the points, NaN where there is none.
+	// The height of the ground under each of the points, NO_GROUND where there is none
+	// (see no_ground() in RoadBuilder.cpp: not a NaN).
 	// What was found once is remembered (see ground_cache_).
 	void ground_heights(const QVector<Unigine::Math::Vec3> &points, QVector<double> &heights) const;
 

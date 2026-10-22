@@ -111,10 +111,12 @@ Math::BoundFrustum local_frustum(const View &view, const Math::Mat4 &transform)
 	return Math::BoundFrustum(view.frustum, Math::inverse4(camera_local));
 }
 
-// Whether the surface is drawn at this distance (its visibility and fade distances).
-bool is_surface_visible(const ObjectPtr &object, int surface, float distance)
+// Whether the surface is drawn in the view at this distance: the camera sees it (its
+// viewport mask: a mesh that only casts the shadow is not seen), and its visibility and
+// fade distances.
+bool is_surface_visible(const ObjectPtr &object, int surface, float distance, int viewport_mask)
 {
-	if (!object->isEnabled(surface))
+	if (!object->isEnabled(surface) || (object->getViewportMask(surface) & viewport_mask) == 0)
 		return false;
 
 	const float min_visible = object->getMinVisibleDistance(surface);
@@ -193,7 +195,7 @@ void collect_mesh(const View &view, const ObjectPtr &object, const ConstMeshPtr 
 
 	for (int surface : scratch.surfaces)
 	{
-		if (surface >= object->getNumSurfaces() || !is_surface_visible(object, surface, distance))
+		if (surface >= object->getNumSurfaces() || !is_surface_visible(object, surface, distance, view.player->getViewportMask()))
 			continue;
 		scratch.triangles.clear();
 		if (!mesh->getTriangleCollision(frustum, scratch.triangles, surface))
@@ -262,7 +264,7 @@ void collect_dynamic(const View &view, const ObjectMeshDynamicPtr &object, Vecto
 
 	for (int surface = 0, num = object->getNumSurfaces(); surface < num; ++surface)
 	{
-		if (!frustum.insideValidFast(object->getBoundBox(surface)) || !is_surface_visible(object, surface, distance))
+		if (!frustum.insideValidFast(object->getBoundBox(surface)) || !is_surface_visible(object, surface, distance, view.player->getViewportMask()))
 			continue;
 
 		scratch.visited.clear();

@@ -2,12 +2,13 @@
 
 #include <QWidget>
 
+class BakerWindow;
 class QCheckBox;
-class QTabWidget;
 
 namespace ArtistTool
 {
 
+class TabRows;
 class ClutterUnpackPage;
 class IconBrowserPage;
 class MeasurePage;
@@ -15,6 +16,7 @@ class ObjectPlacerPage;
 class PathPlacerPage;
 class RoadBuilderPage;
 class UiGalleryPage;
+class WireBuilderPage;
 
 // Main tool window of the plugin: one tab per artist tool, plus the Debug tab with
 // rarely needed switches of the tools and the reference pages (UI Gallery, Icons).
@@ -41,12 +43,14 @@ private:
 	// Asks, then puts every setting of every page back to its default.
 	void reset_all_settings();
 
-	QTabWidget *tabs_{nullptr};
+	TabRows *tabs_{nullptr};
 	QCheckBox *old_curve_{nullptr};
+	::BakerWindow *baker_page_{nullptr};
 	ClutterUnpackPage *clutter_unpack_page_{nullptr};
 	ObjectPlacerPage *object_placer_page_{nullptr};
 	PathPlacerPage *path_placer_page_{nullptr};
 	RoadBuilderPage *road_builder_page_{nullptr};
+	WireBuilderPage *wire_builder_page_{nullptr};
 	MeasurePage *measure_page_{nullptr};
 	UiGalleryPage *ui_gallery_page_{nullptr};
 	IconBrowserPage *icon_browser_page_{nullptr};

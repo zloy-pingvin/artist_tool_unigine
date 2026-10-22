@@ -176,7 +176,9 @@ public:
 	// they are put in place only by rearrange().
 	void setLiveUpdate(bool live);
 	bool isLiveUpdate() const { return live_update_; }
-	void rearrange();
+	// Puts the objects in place; 'undoable' - as one step of the undo history (Rearrange
+	// Now), else as the live update does it, on top of the step that moved the path.
+	void rearrange(bool undoable = false);
 
 	CurvePointsState getSelectedPointsState() const;
 	void setSelectedPointsCorner(bool corner);
@@ -188,6 +190,9 @@ public:
 	// Adds the asset selected in the Asset Browser to the end of the pattern.
 	// Adds all the assets selected in the Asset Browser to the end of the pattern.
 	bool addPatternAssets();
+	// Puts another asset into the entry (picked in the asset dialog or dropped onto it); its
+	// role and count stay, the length is measured again.
+	bool replacePatternAsset(int index, const Unigine::Vector<Unigine::UGUID> &guids);
 	void removePatternItem(int index);
 	// Moves an entry of the pattern up (offset -1) or down (+1) the list.
 	void movePatternItem(int index, int offset);

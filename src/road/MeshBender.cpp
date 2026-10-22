@@ -56,6 +56,143 @@ void collect_objects(const NodePtr &node, QVector<ObjectMeshStaticPtr> &objects)
 		collect_objects(node->getChild(i), objects);
 }
 
+// A vertex of a surface with all it carries, and where it is along the forward axis.
+struct SliceVertex
+{
+	Math::vec3 position;
+	Math::vec3 normal;
+	Math::vec2 uv0;
+	Math::vec2 uv1;
+	Math::vec4 color;
+	float along{0.0f};
+};
+
+SliceVertex lerp_vertex(const SliceVertex &a, const SliceVertex &b, float t)
+{
+	SliceVertex v;
+	v.position = a.position + (b.position - a.position) * t;
+	v.normal = a.normal + (b.normal - a.normal) * t;
+	if (Math::length2(v.normal) > 1e-12f)
+		v.normal = Math::normalize(v.normal);
+	v.uv0 = a.uv0 + (b.uv0 - a.uv0) * t;
+	v.uv1 = a.uv1 + (b.uv1 - a.uv1) * t;
+	v.color = a.color + (b.color - a.color) * t;
+	v.along = a.along + (b.along - a.along) * t;
+	return v;
+}
+
+// The part of the polygon on one side of the plane 'along = cut': the side above it, or
+// the one below.
+QVector<SliceVertex> clip_polygon(const QVector<SliceVertex> &polygon, float cut, bool above)
+{
+	QVector<SliceVertex> result;
+	for (int i = 0; i < polygon.size(); ++i)
+	{
+		const SliceVertex &a = polygon[i];
+		const SliceVertex &b = polygon[(i + 1) % polygon.size()];
+		const bool a_in = above ? a.along >= cut : a.along <= cut;
+		const bool b_in = above ? b.along >= cut : b.along <= cut;
+		if (a_in)
+			result.append(a);
+		if (a_in != b_in)
+			result.append(lerp_vertex(a, b, (cut - a.along) / (b.along - a.along)));
+	}
+	return result;
+}
+
+// Cuts the triangles of the surface by the planes across the forward axis at the 'cuts'
+// (sorted, along that axis) into 'result' (only its geometry is set): every part between
+// two planes becomes triangles of its own, with its winding kept. A triangle no plane
+// crosses stays as it is, its vertices shared as they were.
+void slice_surface(const BendSource::Surface &surface, const QVector<float> &cuts,
+	const std::function<float(const Math::vec3 &)> &along_of, BendSource::Surface &result)
+{
+	// Cleared, not freed: the next copy fills the same memory.
+	result.positions.clear();
+	result.normals.clear();
+	result.uv0.clear();
+	result.uv1.clear();
+	result.colors.clear();
+	result.indices.clear();
+
+	const int count = int(surface.positions.size());
+	QVector<float> along(count);
+	for (int i = 0; i < count; ++i)
+		along[i] = along_of(surface.positions[i]);
+	QVector<int> kept(count, -1);
+	const auto keep = [&](int i) {
+		if (kept[i] < 0)
+		{
+			result.positions.append(surface.positions[i]);
+			result.normals.append(surface.normals[i]);
+			result.uv0.append(surface.uv0[i]);
+			result.uv1.append(surface.uv1[i]);
+			result.colors.append(surface.colors[i]);
+			kept[i] = int(result.positions.size()) - 1;
+		}
+		return kept[i];
+	};
+	const auto vertex = [&](int i) {
+		SliceVertex v;
+		v.position = surface.positions[i];
+		v.normal = surface.normals[i];
+		v.uv0 = surface.uv0[i];
+		v.uv1 = surface.uv1[i];
+		v.color = surface.colors[i];
+		v.along = along[i];
+		return v;
+	};
+	const auto append = [&](const SliceVertex &v) {
+		result.positions.append(v.position);
+		result.normals.append(v.normal);
+		result.uv0.append(v.uv0);
+		result.uv1.append(v.uv1);
+		result.colors.append(v.color);
+		return int(result.positions.size()) - 1;
+	};
+
+	QVector<float> bounds;
+	for (int t = 0; t + 2 < surface.indices.size(); t += 3)
+	{
+		const int i0 = surface.indices[t];
+		const int i1 = surface.indices[t + 1];
+		const int i2 = surface.indices[t + 2];
+		const float low = qMin(along[i0], qMin(along[i1], along[i2]));
+		const float high = qMax(along[i0], qMax(along[i1], along[i2]));
+		// The first cut past its start: none, or past its end - no plane crosses it.
+		const auto first_cut = std::upper_bound(cuts.begin(), cuts.end(), low);
+		if (first_cut == cuts.end() || *first_cut >= high)
+		{
+			result.indices.append(keep(i0));
+			result.indices.append(keep(i1));
+			result.indices.append(keep(i2));
+			continue;
+		}
+		bounds.clear();
+		bounds.append(low);
+		for (auto cut = first_cut; cut != cuts.end() && *cut < high; ++cut)
+			bounds.append(*cut);
+		bounds.append(high);
+		const QVector<SliceVertex> triangle = {vertex(i0), vertex(i1), vertex(i2)};
+		for (int b = 0; b + 1 < bounds.size(); ++b)
+		{
+			const QVector<SliceVertex> part = clip_polygon(clip_polygon(triangle, bounds[b], true), bounds[b + 1], false);
+			if (part.size() < 3)
+				continue;
+			const int first = append(part[0]);
+			int previous = append(part[1]);
+			for (int k = 2; k < part.size(); ++k)
+			{
+				const int current = append(part[k]);
+				result.indices.append(first);
+				result.indices.append(previous);
+				result.indices.append(current);
+				previous = current;
+			}
+		}
+	}
+}
+
 } // namespace
 
 int BendSource::numTriangles() const
@@ -317,17 +454,84 @@ BendBounds bendBounds(const BendSource &source, const BendAxes &axes)
 	return bounds;
 }
 
+qint64 bentTriangles(const BendSource &source, const BendAxes &axes, int copies, double turn, float max_angle)
+{
+	const qint64 triangles = qint64(copies) * qint64(source.numTriangles());
+	if (max_angle <= 0.0f || copies <= 0 || turn <= 0.0)
+		return triangles;
+	// How many triangles a plane across the copy crosses: the lengths of all of them along
+	// it, in lengths of the copy.
+	Math::vec3 forward, right, up;
+	axis_vectors(axes, forward, right, up);
+	const float length = bendBounds(source, axes).length();
+	if (length < 1e-6f)
+		return triangles;
+	double extents = 0.0;
+	for (const BendSource::Surface &surface : source.surfaces)
+	{
+		for (int t = 0; t + 2 < surface.indices.size(); t += 3)
+		{
+			float low = Math::Consts::INF;
+			float high = -Math::Consts::INF;
+			for (int k = 0; k < 3; ++k)
+			{
+				const float a = Math::dot(surface.positions[surface.indices[t + k]] * axes.scale, forward);
+				low = qMin(low, a);
+				high = qMax(high, a);
+			}
+			extents += double(high - low);
+		}
+	}
+	const double crossed = qMin(extents / double(length), double(source.numTriangles()));
+	// A cut where the curve turns by max_angle, up to twice as many: they are found by
+	// halving. At most those of the deepest halving in every copy.
+	const double cuts = qMin(2.0 * std::ceil(turn / double(max_angle)), double(copies) * 4095.0);
+	return triangles + qint64(cuts * 2.0 * crossed);
+}
+
 void bendCopy(const BendSource &source, const BendAxes &axes, const BendBounds &bounds, const QStringList &names,
-	double start, double fit, const std::function<BendFrame(double)> &frame, const Math::Vec3 &pivot, const MeshPtr &mesh)
+	double start, double fit, const std::function<BendFrame(double)> &frame, const Math::Vec3 &pivot, const MeshPtr &mesh,
+	float max_angle)
 {
 	Math::vec3 forward, right, up;
 	axis_vectors(axes, forward, right, up);
+
+	// Where the curve bends or the twist turns the copy by more than max_angle between two
+	// places along it, it is cut across between them, again and again: the copy gets rows
+	// only where it is needed, the straight parts none.
+	QVector<float> cuts;
+	if (max_angle > 0.0f && bounds.length() > 1e-6f)
+	{
+		const float limit = std::cos(max_angle * float(Math::Consts::DEG2RAD));
+		const auto turns = [&](float a, float b) {
+			const BendFrame fa = frame(start + double(a) * fit);
+			const BendFrame fb = frame(start + double(b) * fit);
+			return Math::dot(fa.forward, fb.forward) < limit || Math::dot(fa.up, fb.up) < limit;
+		};
+		const std::function<void(float, float, int)> divide = [&](float a, float b, int depth) {
+			// The middle too: a full turn of the twist ends looking the way it started.
+			const float middle = (a + b) * 0.5f;
+			if (depth >= 12 || !(turns(a, b) || turns(a, middle) || turns(middle, b)))
+				return;
+			divide(a, middle, depth + 1);
+			cuts.append(middle);
+			divide(middle, b, depth + 1);
+		};
+		divide(0.0f, bounds.length(), 0);
+	}
+	const auto along_of = [&](const Math::vec3 &p) { return Math::dot(p * axes.scale, forward) - bounds.along_min; };
+	// The surface cut, made anew for every surface in the same memory: the source itself is
+	// not copied.
+	thread_local BendSource::Surface sliced;
+
 	// The normals of a mesh scaled unevenly turn by the inverse of the scale.
 	const Math::vec3 normal_scale(1.0f / axes.scale.x, 1.0f / axes.scale.y, 1.0f / axes.scale.z);
 
 	for (int i = 0; i < source.surfaces.size() && i < names.size(); ++i)
 	{
-		const BendSource::Surface &surface = source.surfaces[i];
+		if (!cuts.isEmpty())
+			slice_surface(source.surfaces[i], cuts, along_of, sliced);
+		const BendSource::Surface &surface = cuts.isEmpty() ? source.surfaces[i] : sliced;
 		const QByteArray name = names[i].toUtf8();
 		int s = mesh->findSurface(name.constData());
 		if (s < 0)

@@ -9,6 +9,7 @@
 #include <QElapsedTimer>
 #include <QPoint>
 #include <QString>
+#include <QByteArray>
 #include <QVector>
 
 #include <functional>
@@ -174,6 +175,9 @@ public:
 	// points have it on and off, and turning it on or off for all of them.
 	void countSelectedPointsFlag(const char *data, int &on, int &off) const;
 	void setSelectedPointsFlag(const char *data, bool on);
+	// The names of the data a point keeps for the span from it to the next point: a point
+	// put into the span by subdivide() gets them from the point the span starts at.
+	void setSpanData(const QVector<QByteArray> &names) { span_data_ = names; }
 	// Puts a new point in the middle of every span whose both ends are selected.
 	bool canSubdivide() const;
 	void subdivide();
@@ -203,6 +207,7 @@ private:
 	bool closed_{false};
 	SurfaceFilter filter_;
 	Unigine::NodePtr look_through_;
+	QVector<QByteArray> span_data_;
 	bool adding_points_{false};
 	// The press of the click in progress was taken by the tool; whether its release
 	// is to be kept from the editor as well.

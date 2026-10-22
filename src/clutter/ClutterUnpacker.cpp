@@ -1,5 +1,6 @@
 #include "ClutterUnpacker.h"
 #include "Localization.h"
+#include "UndoActions.h"
 
 #include <editor/UnigineActions.h>
 #include <editor/UnigineSelection.h>
@@ -409,9 +410,13 @@ bool ClutterUnpacker::begin_world_clutter_bake(const NodePtr &node)
 	Render::setForceStreaming(true);
 	clutter->setSpawnRate(spawn_rate);
 	clutter->setVisibleDistance(reach); // calls invalidate() internally
+	bake_.bake_spawn_rate = spawn_rate;
+	bake_.bake_visible_distance = reach;
 
 	Engine::get()->getEventEndWorldUpdate().connect(bake_connections_, this,
 		&ClutterUnpacker::bake_tick);
+	World::getEventPreWorldSave().connect(bake_connections_, this, &ClutterUnpacker::before_world_save);
+	World::getEventPostWorldSave().connect(bake_connections_, this, &ClutterUnpacker::after_world_save);
 
 	Log::message("ArtistTool: baking world clutter '%s' (references: %d)\n",
 		node->getName(), clutter->getNumReferences());
@@ -715,6 +720,26 @@ void ClutterUnpacker::finish_world_clutter_bake()
 	node_done(true, captured.size());
 }
 
+void ClutterUnpacker::before_world_save(const char *)
+{
+	if (!bake_.clutter || bake_.clutter.isDeleted())
+		return;
+	bake_.clutter->setSpawnRate(bake_.saved_spawn_rate);
+	bake_.clutter->setVisibleDistance(bake_.saved_visible_distance);
+	if (bake_.disabled_by_bake)
+		bake_.clutter->setEnabled(true);
+}
+
+void ClutterUnpacker::after_world_save(const char *)
+{
+	if (!bake_.clutter || bake_.clutter.isDeleted())
+		return;
+	bake_.clutter->setSpawnRate(bake_.bake_spawn_rate);
+	bake_.clutter->setVisibleDistance(bake_.bake_visible_distance);
+	if (bake_.disabled_by_bake)
+		bake_.clutter->setEnabled(false);
+}
+
 void ClutterUnpacker::restore_bake_state(bool restore_enabled)
 {
 	bake_connections_.disconnectAll();
@@ -771,6 +796,13 @@ void ClutterUnpacker::commit_result(const NodePtr &source, const NodePtr &root)
 	using namespace ::UnigineEditor;
 	Undo::begin();
 	Undo::apply(new CreateNodesAction(root));
+	// Right below the source after Ctrl+Z and Ctrl+Y too.
+	if (options_.keep_parent && !source->getPossessor())
+	{
+		ArtistTool::SetNodeOrderAction *order = new ArtistTool::SetNodeOrderAction;
+		order->add(root);
+		Undo::apply(order);
+	}
 	switch (options_.source_mode)
 	{
 		case UnpackOptions::SOURCE_DISABLE:

@@ -3,7 +3,9 @@
 #include "Localization.h"
 #include "PathPlacer.h"
 
+#include <QPointer>
 #include <QString>
+#include <QVector>
 #include <QWidget>
 
 class QButtonGroup;
@@ -12,6 +14,7 @@ class QDoubleSpinBox;
 class QLabel;
 class QListWidget;
 class QPushButton;
+class QSpinBox;
 class QToolButton;
 class QVBoxLayout;
 
@@ -83,6 +86,9 @@ private:
 	bool settings_reset_{false};
 	// What the rows of the pattern list were last built for.
 	QString pattern_signature_;
+	// The count and the length fields of the rows of the pattern, in order.
+	QVector<QPointer<QSpinBox>> pattern_counts_;
+	QVector<QPointer<QDoubleSpinBox>> pattern_lengths_;
 
 	QLabel *path_label_{nullptr};
 	// The paths of the world, to switch between them; in the order of the list.

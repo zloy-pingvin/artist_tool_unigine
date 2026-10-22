@@ -1,8 +1,15 @@
 #include "UiHelpers.h"
 
 #include <UnigineEngine.h>
+#include <UnigineFileSystem.h>
+#include <UnigineImage.h>
 
 #include <QAbstractSpinBox>
+#include <QApplication>
+#include <QDialog>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QTextEdit>
 #include <QButtonGroup>
 #include <QCryptographicHash>
 #include <QDial>
@@ -11,6 +18,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
+#include <QHash>
+#include <QImage>
 #include <QHBoxLayout>
 #include <QMouseEvent>
 #include <QWheelEvent>
@@ -229,6 +238,68 @@ QIcon findEditorIcon(const QString &file_name)
 
 	QDirIterator it(QString::fromUtf8(":/"), {file_name}, QDir::Files, QDirIterator::Subdirectories);
 	return it.hasNext() ? QIcon(it.next()) : QIcon();
+}
+
+QIcon nodeTypeIcon(const char *type_name)
+{
+	static QHash<QString, QIcon> icons;
+	const QString name = QString::fromUtf8(type_name);
+	const auto found = icons.constFind(name);
+	if (found != icons.constEnd())
+		return found.value();
+
+	// The icons are in core.ung, which Qt can not open: they are read by the engine, the
+	// way the editor does it.
+	QIcon icon;
+	const QByteArray path = QString::fromUtf8("core/gui/node_icons/%1_x16.png").arg(name).toUtf8();
+	Unigine::ImagePtr image = Unigine::Image::create();
+	if (Unigine::FileSystem::isFileExist(path.constData()) && image->load(path.constData())
+		&& (!image->isCompressedFormat() && image->getFormat() <= Unigine::Image::FORMAT_RGBA8
+			|| image->convertToFormat(Unigine::Image::FORMAT_RGBA8)))
+	{
+		const int width = image->getWidth();
+		const int height = image->getHeight();
+		const int channels = image->getNumChannels();
+		const unsigned char *pixels = image->getPixels2D();
+		if (width > 0 && height > 0 && pixels)
+		{
+			QImage picture(width, height, QImage::Format_RGBA8888);
+			for (int y = 0; y < height; ++y)
+			{
+				unsigned char *line = picture.scanLine(y);
+				for (int x = 0; x < width; ++x)
+				{
+					const unsigned char *p = pixels + (y * width + x) * channels;
+					// Gray, gray with alpha, RGB, RGBA.
+					line[x * 4 + 0] = p[0];
+					line[x * 4 + 1] = channels >= 3 ? p[1] : p[0];
+					line[x * 4 + 2] = channels >= 3 ? p[2] : p[0];
+					line[x * 4 + 3] = channels == 4 ? p[3] : channels == 2 ? p[1] : 255;
+				}
+			}
+			icon = QIcon(QPixmap::fromImage(picture));
+		}
+	}
+	icons.insert(name, icon);
+	return icon;
+}
+
+bool isEscapeFree(QObject *watched)
+{
+	if (QApplication::activeModalWidget() || QApplication::activePopupWidget())
+		return false;
+	for (QObject *object : {watched, static_cast<QObject *>(QApplication::focusWidget())})
+	{
+		if (qobject_cast<QLineEdit *>(object) || qobject_cast<QTextEdit *>(object)
+			|| qobject_cast<QPlainTextEdit *>(object) || qobject_cast<QAbstractSpinBox *>(object))
+			return false;
+		if (const QWidget *widget = qobject_cast<QWidget *>(object))
+		{
+			if (qobject_cast<const QDialog *>(widget->window()))
+				return false;
+		}
+	}
+	return true;
 }
 
 QString axisColor(int axis)

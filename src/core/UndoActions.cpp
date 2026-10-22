@@ -15,6 +15,8 @@
 #include <QFile>
 #include <QObject>
 
+#include <algorithm>
+
 using namespace Unigine;
 using ::UnigineEditor::Undo;
 
@@ -454,7 +456,14 @@ SetPiecesAction::SetPiecesAction()
 
 SetPiecesAction::~SetPiecesAction()
 {
+	delete files_;
 	--live_actions;
+}
+
+void SetPiecesAction::setFiles(SetFilesAction *files)
+{
+	delete files_;
+	files_ = files;
 }
 
 void SetPiecesAction::add(const NodePtr &node, const PieceState &before)
@@ -479,12 +488,55 @@ void SetPiecesAction::put(bool after) const
 
 void SetPiecesAction::undo()
 {
+	if (files_)
+		files_->undo();
 	put(false);
 }
 
 void SetPiecesAction::redo()
 {
+	if (files_)
+		files_->redo();
 	put(true);
+}
+
+SetNodeOrderAction::SetNodeOrderAction()
+{
+	++live_actions;
+}
+
+SetNodeOrderAction::~SetNodeOrderAction()
+{
+	--live_actions;
+}
+
+void SetNodeOrderAction::add(const NodePtr &node)
+{
+	if (!node)
+		return;
+	Entry entry;
+	entry.node = node->getID();
+	entry.root = !node->getParent();
+	entry.index = entry.root ? World::getRootNodeIndex(node) : node->getParent()->getChildIndex(node);
+	entries_.append(entry);
+}
+
+void SetNodeOrderAction::redo()
+{
+	// From the first place to the last: every node put in its place leaves the places
+	// of the ones before it as they are.
+	QVector<Entry> entries = entries_;
+	std::sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) { return a.index < b.index; });
+	for (const Entry &entry : entries)
+	{
+		const NodePtr node = node_of(entry.node);
+		if (!node)
+			continue;
+		if (entry.root)
+			World::setRootNodeIndex(node, entry.index);
+		else if (const NodePtr parent = node->getParent())
+			parent->setChildIndex(node, entry.index);
+	}
 }
 
 void releaseUndoActions()

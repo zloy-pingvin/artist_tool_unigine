@@ -1,8 +1,8 @@
 {
   "Name": "artist_tool",
   "Vendor": "zloy_pingvin",
-  "Description": "Tools for artists: Object Placer (click to place assets on surfaces), Path Placer (objects and fences along a curve), Road (meshes, decals and bent meshes along a curve), Measure (distances and angles), Unpack Clutter (clutters into regular nodes). By zloy_pingvin - https://t.me/zloytux",
-  "Version": "1.3.1.1",
+  "Description": "Tools for artists: Object Placer (click to place assets on surfaces), Path Placer (objects and fences along a curve), Road (meshes, decals and bent meshes along a curve), Wires (wires hanging between poles), Measure (distances and angles), Unpack Clutter (clutters into regular nodes), Texture Baker (albedo, roughness and normal from a high-poly model to a low-poly one). By zloy_pingvin - https://t.me/zloytux",
+  "Version": "1.4.6.0",
   "CompatVersion": "1.0.0.0",
   "Dependencies": []
 }

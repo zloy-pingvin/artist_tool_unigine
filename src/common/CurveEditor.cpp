@@ -613,11 +613,24 @@ void CurveEditor::subdivide()
 			point->setData(CURVE_WIDTH_DATA, QByteArray::number(width, 'g', 6).constData());
 		if (points.off_ground[span] || points.off_ground[next])
 			point->setData(CURVE_OFF_GROUND_DATA, "1");
+		// What the point the span starts at sets for it, for both its halves.
+		for (const QByteArray &name : span_data_)
+		{
+			if (const char *value = a->getData(name.constData()))
+				point->setData(name.constData(), value);
+		}
 		point->setShowInEditorEnabledRecursive(true);
 		point->setSaveToWorldEnabledRecursive(true);
 		created.append(point);
 	}
+	// The new points keep their places between the old ones after Ctrl+Z and Ctrl+Y too.
+	SetNodeOrderAction *order = new SetNodeOrderAction;
+	for (const NodePtr &point : created)
+		order->add(point);
+	::UnigineEditor::Undo::begin();
 	::UnigineEditor::Undo::apply(new ::UnigineEditor::CreateNodesAction(created));
+	::UnigineEditor::Undo::apply(order);
+	::UnigineEditor::Undo::commit();
 
 	report(MSG_INFO, QString());
 	notify_changed();

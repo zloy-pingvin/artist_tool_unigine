@@ -109,9 +109,19 @@ struct BendFrame
 // 'pivot'. The copy keeps its own (scaled) length along the curve times 'fit' - the
 // little stretch that makes a whole number of copies fill the curve. 'frame' tells
 // the frame at a distance.
+// With 'max_angle' (degrees), the copy is cut across by planes wherever the curve bends
+// or twists it by more than that between two cuts: a mesh with few segments along its
+// length bends and twists smoothly, and the straight parts get no more triangles. 0 -
+// the copy is as the source.
 void bendCopy(const BendSource &source, const BendAxes &axes, const BendBounds &bounds, const QStringList &names,
 	double start, double fit, const std::function<BendFrame(double)> &frame, const Unigine::Math::Vec3 &pivot,
-	const Unigine::MeshPtr &mesh);
+	const Unigine::MeshPtr &mesh, float max_angle = 0.0f);
+
+// About how many triangles 'copies' copies of the source get from bendCopy() along a curve
+// that turns by 'turn' degrees in all (its bends and its twist) under them: their own, and
+// those the cuts by 'max_angle' add - every cut makes three triangles of each one it
+// crosses.
+qint64 bentTriangles(const BendSource &source, const BendAxes &axes, int copies, double turn, float max_angle);
 
 // Gives a surface of the result what its surface of the source has: the material, the
 // distances of the LOD and the shadows.

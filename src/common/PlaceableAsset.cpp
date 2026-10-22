@@ -1,5 +1,6 @@
 #include "PlaceableAsset.h"
 #include "Localization.h"
+#include "UiHelpers.h"
 
 #include <editor/UnigineActions.h>
 #include <editor/UnigineAssetManager.h>
@@ -33,10 +34,7 @@ QString extension_of(const char *path)
 // Extension of the file behind a GUID: "node", "mesh", ...
 QString extension_of(const UGUID &guid)
 {
-	QString extension = QString::fromUtf8(FileSystem::getExtension(guid).get()).toLower();
-	if (extension.startsWith('.'))
-		extension.remove(0, 1);
-	return extension;
+	return extensionOf(guid);
 }
 
 QString runtime_name(const UGUID &guid)
@@ -208,6 +206,14 @@ NodePtr createNode(const PlaceableAsset &asset)
 	return node;
 }
 
+QString extensionOf(const UGUID &guid)
+{
+	QString extension = QString::fromUtf8(FileSystem::getExtension(guid).get()).toLower();
+	if (extension.startsWith(QLatin1Char('.')))
+		extension.remove(0, 1);
+	return extension;
+}
+
 QString kindLabel(PlaceableAsset::Kind kind)
 {
 	switch (kind)
@@ -216,6 +222,17 @@ QString kindLabel(PlaceableAsset::Kind kind)
 		case PlaceableAsset::KIND_MODEL:          return uiText("Model", "Модель");
 		case PlaceableAsset::KIND_MESH:           return QString::fromUtf8("Mesh Static");
 		default:                                  return QString();
+	}
+}
+
+QIcon kindIcon(PlaceableAsset::Kind kind)
+{
+	switch (kind)
+	{
+		case PlaceableAsset::KIND_NODE_REFERENCE: return nodeTypeIcon("NodeReference");
+		case PlaceableAsset::KIND_MODEL:
+		case PlaceableAsset::KIND_MESH:           return nodeTypeIcon("ObjectMeshStatic");
+		default:                                  return QIcon();
 	}
 }
 

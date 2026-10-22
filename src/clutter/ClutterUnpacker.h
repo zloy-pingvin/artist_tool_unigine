@@ -98,6 +98,10 @@ private:
 	Unigine::Math::Vec3 attach_bake_camera(const Unigine::NodePtr &node);
 	void detach_bake_camera();
 	void bake_tick();
+	// The world is saved while a clutter is being baked: it is saved with the settings the
+	// clutter had before the bake, and gets those of the bake back after.
+	void before_world_save(const char *path);
+	void after_world_save(const char *path);
 	void finish_world_clutter_bake();
 	void restore_bake_state(bool restore_enabled);
 
@@ -133,6 +137,9 @@ private:
 		bool saved_force_streaming{false};
 		int saved_spawn_rate{1};
 		float saved_visible_distance{0.0f};
+		// What the bake set on the clutter.
+		int bake_spawn_rate{1};
+		float bake_visible_distance{0.0f};
 		Unigine::WorldClutterPtr clutter;
 		Unigine::HashSet<int> stale_ids;
 

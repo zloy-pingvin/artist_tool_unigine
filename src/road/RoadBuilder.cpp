@@ -1,5 +1,8 @@
 #include "RoadBuilder.h"
+#include "UiHelpers.h"
 #include "Localization.h"
+#include "GeneratedFiles.h"
+#include "NodeData.h"
 #include "PlaceableAsset.h"
 #include "UndoActions.h"
 
@@ -46,6 +49,14 @@ namespace ArtistTool
 namespace
 {
 
+// The height of the ground where there is none. Not a NaN: the fast floating point
+// options of the build may take a NaN check for always false.
+const double NO_GROUND = -1.0e300;
+bool no_ground(double height)
+{
+	return height <= NO_GROUND * 0.5;
+}
+
 const char ROOT_NODE_NAME[] = "road";
 const char MESH_NODE_NAME[] = "mesh";
 const char DEFAULT_FOLDER_NAME[] = "roads";
@@ -55,6 +66,9 @@ const char DEFAULT_FOLDER_NAME[] = "roads";
 // road was like then.
 const char SETTINGS_DATA[] = "artist_tool_road";
 const char FILES_DATA[] = "artist_tool_road_files";
+// The GUIDs of those files, line by line: a file moved away and another one put at its
+// path is not taken for one of them.
+const char FILE_GUIDS_DATA[] = "artist_tool_road_file_guids";
 const char BASE_NAME_DATA[] = "artist_tool_road_base";
 const char FOLDER_DATA[] = "artist_tool_road_folder";
 const char STATE_DATA[] = "artist_tool_road_state";
@@ -65,6 +79,13 @@ const char KIND_DATA[] = "artist_tool_road_kind";
 // Copy / Paste) takes the data of the original, and must not write or remove the
 // files of the original.
 const char OWNER_DATA[] = "artist_tool_road_owner";
+
+// The data of the last Generate, for the helpers of common/GeneratedFiles.
+GeneratedData road_generated_data()
+{
+	return GeneratedData{FILES_DATA, FILE_GUIDS_DATA, BASE_NAME_DATA, FOLDER_DATA, OWNER_DATA};
+}
+
 // "1" on a piece hidden while it is out of date (see setHideOutdated()).
 const char HIDDEN_DATA[] = "artist_tool_hidden";
 // The width of a point of the road, a multiplier of Width. None - 1.
@@ -115,7 +136,7 @@ const int MAX_DECAL_TRIANGLES = 10000;
 const double MIN_POINT_WIDTH = 0.01;
 const double MAX_POINT_WIDTH = 100.0;
 // The most triangles the copies of a bent mesh may have all together.
-const int MAX_BEND_TRIANGLES = 4000000;
+const int MAX_BEND_TRIANGLES = 1000000;
 
 // A ray finds the ground from above the point down, so what it finds depends on the
 // height of the point too (one level of a bridge or another); the Landscape Terrain
@@ -134,7 +155,10 @@ const double MITER_LIMIT = 3.0;
 
 bool is_road_root(const NodePtr &node)
 {
-	return node->findChild(CURVE_PATH_NODE_NAME) >= 0 && node->findChild(MESH_NODE_NAME) >= 0;
+	// A line of wires drawn as a curve has a "path" and a "mesh" too; it has the data of
+	// the Wires tool.
+	return node->findChild(CURVE_PATH_NODE_NAME) >= 0 && node->findChild(MESH_NODE_NAME) >= 0
+		&& !node->hasData("artist_tool_wire");
 }
 
 // The root of the road the node is a part of.
@@ -146,24 +170,6 @@ NodePtr find_road_root(const NodePtr &node)
 			return n;
 	}
 	return NodePtr();
-}
-
-void put(QByteArray &bytes, double value)
-{
-	bytes.append(reinterpret_cast<const char *>(&value), sizeof(value));
-}
-
-void put(QByteArray &bytes, const Math::Vec3 &value)
-{
-	put(bytes, double(value.x));
-	put(bytes, double(value.y));
-	put(bytes, double(value.z));
-}
-
-QString data_string(const NodePtr &node, const char *name)
-{
-	const char *data = node->getData(name);
-	return QString::fromUtf8(data ? data : "");
 }
 
 double point_width(const NodePtr &point)
@@ -185,32 +191,6 @@ Math::Vec3 level(const Math::Vec3 &v)
 	return Math::Vec3(v.x, v.y, 0.0);
 }
 
-// A name a file can have: letters, digits, '_' and '-'.
-QString file_name_of(const QString &name)
-{
-	QString result;
-	for (const QChar c : name)
-		result += (c.isLetterOrNumber() && c.unicode() < 128) || c == QLatin1Char('-') ? c : QLatin1Char('_');
-	return result.isEmpty() ? QString::fromUtf8(ROOT_NODE_NAME) : result;
-}
-
-// The path of the mesh of a piece in the data of the project; 'folder' is empty for
-// the data folder itself.
-QString asset_file(const QString &folder, const QString &base, int piece)
-{
-	const QString name = QString::fromUtf8("%1_%2.mesh").arg(base).arg(piece, 2, 10, QLatin1Char('0'));
-	return folder.isEmpty() ? name : folder + QLatin1Char('/') + name;
-}
-
-// The data folder of the project on the disk, with a slash at the end.
-QString data_path()
-{
-	QString path = QDir::fromNativeSeparators(QString::fromUtf8(Engine::get()->getDataPath()));
-	if (!path.endsWith(QLatin1Char('/')))
-		path += QLatin1Char('/');
-	return path;
-}
-
 RoadSettings limited(RoadSettings settings)
 {
 	settings.width = qMax(settings.width, MIN_WIDTH);
@@ -225,6 +205,7 @@ RoadSettings limited(RoadSettings settings)
 	settings.decal_fade_distance = qMax(settings.decal_fade_distance, 0.0f);
 	settings.inner_round = qMax(settings.inner_round, 0.0f);
 	settings.roll = qBound(-90.0f, settings.roll, 90.0f);
+	settings.bend_mesh_angle = qBound(0.0f, settings.bend_mesh_angle, 90.0f);
 	settings.bend_forward = AxisDirection(qBound(int(AXIS_X_POSITIVE), int(settings.bend_forward), int(AXIS_Z_NEGATIVE)));
 	settings.bend_up = AxisDirection(qBound(int(AXIS_X_POSITIVE), int(settings.bend_up), int(AXIS_Z_NEGATIVE)));
 	// One start and one end at most (the first ones), the start first in the list, the
@@ -258,11 +239,6 @@ RoadSettings limited(RoadSettings settings)
 	settings.bend_parts = starts + patterns + ends;
 	settings.ground.look_through = true;
 	return settings;
-}
-
-UGUID guid_of(const QString &text)
-{
-	return text.isEmpty() ? UGUID() : UGUID(text.toUtf8().constData());
 }
 
 // Whether the material can be put on the pieces of the kind: a decal material on
@@ -308,15 +284,6 @@ void set_mesh_path(const NodePtr &piece, const String &path)
 		checked_ptr_cast<DecalMesh>(piece)->setMeshPath(path.get());
 	else if (piece->getType() == Node::OBJECT_MESH_STATIC)
 		checked_ptr_cast<ObjectMeshStatic>(piece)->setMeshPath(path.get());
-}
-
-// The extension of the file behind a GUID, without the dot: "mat", "mesh", ...
-QString extension_of(const UGUID &guid)
-{
-	QString extension = QString::fromUtf8(FileSystem::getExtension(guid).get()).toLower();
-	if (extension.startsWith(QLatin1Char('.')))
-		extension.remove(0, 1);
-	return extension;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1202,10 +1169,8 @@ bool RoadBuilder::removeRoad(bool files)
 	const NodePtr root = root_;
 	// Only the files of this road: a copy made by the editor has the list of the
 	// original.
-	const QString owner = data_string(root, OWNER_DATA);
-	const bool own_files = owner.isEmpty() || owner == QString::number(root->getID());
-	const QStringList generated = own_files ? data_string(root, FILES_DATA).split(QLatin1Char('\n'), Qt::SkipEmptyParts)
-		: QStringList();
+	// Only its own files, and not those something else in the world still has as its mesh.
+	const QStringList generated = files ? ownGeneratedFiles(root, road_generated_data()) : QStringList();
 	::UnigineEditor::Undo::apply(new ::UnigineEditor::RemoveNodesAction(root));
 	forget_removed_road(root);
 
@@ -1334,6 +1299,7 @@ void RoadBuilder::resetSettings()
 	settings.bend_forward = settings_.bend_forward;
 	settings.bend_up = settings_.bend_up;
 	settings.bend_merge_materials = settings_.bend_merge_materials;
+	settings.bend_mesh_angle = settings_.bend_mesh_angle;
 	setSettings(settings);
 	report(MSG_INFO, QString());
 }
@@ -1368,6 +1334,7 @@ void RoadBuilder::load_settings()
 	settings.bend_forward = AxisDirection(json.value("bend_forward").toInt(json.value("bend_axis").toInt(defaults.bend_forward)));
 	settings.bend_up = AxisDirection(json.value("bend_up").toInt(defaults.bend_up));
 	settings.bend_merge_materials = json.value("bend_merge_materials").toBool(defaults.bend_merge_materials);
+	settings.bend_mesh_angle = float(json.value("bend_mesh_angle").toDouble(defaults.bend_mesh_angle));
 	const QJsonValue parts = json.value("bend_parts");
 	for (const QJsonValue &item : parts.toArray())
 		settings.bend_parts.append(bend_part_from_json(item.toObject()));
@@ -1435,6 +1402,7 @@ void RoadBuilder::save_settings(bool undoable, bool merge)
 	json.insert("piece_length", double(settings_.piece_length));
 	json.insert("output", int(settings_.output));
 	json.insert("bend_merge_materials", settings_.bend_merge_materials);
+	json.insert("bend_mesh_angle", double(settings_.bend_mesh_angle));
 	json.insert("bend_forward", int(settings_.bend_forward));
 	json.insert("bend_up", int(settings_.bend_up));
 	QJsonArray parts;
@@ -1498,48 +1466,49 @@ QByteArray RoadBuilder::snapshot() const
 	if (!path)
 		return state;
 
-	put(state, double(isOldCurve()));
-	put(state, double(settings_.width));
-	put(state, double(settings_.columns));
-	put(state, double(settings_.step));
-	put(state, double(settings_.max_angle));
-	put(state, double(settings_.closed));
-	put(state, double(settings_.snap_to_ground));
-	put(state, double(settings_.ground_offset));
-	put(state, double(settings_.uv_length));
-	put(state, double(settings_.uv_width));
-	put(state, double(settings_.uv_rotation));
-	put(state, double(settings_.piece_length));
-	put(state, double(settings_.output));
-	put(state, double(settings_.decal_lift));
-	put(state, double(settings_.ground.surface_types));
-	put(state, double(settings_.ground.only_immovable));
-	put(state, double(settings_.ground.only_intersection));
-	put(state, double(settings_.inner_round));
-	put(state, double(settings_.roll));
-	put(state, double(settings_.side_offset));
+	putBytes(state, double(isOldCurve()));
+	putBytes(state, double(settings_.width));
+	putBytes(state, double(settings_.columns));
+	putBytes(state, double(settings_.step));
+	putBytes(state, double(settings_.max_angle));
+	putBytes(state, double(settings_.closed));
+	putBytes(state, double(settings_.snap_to_ground));
+	putBytes(state, double(settings_.ground_offset));
+	putBytes(state, double(settings_.uv_length));
+	putBytes(state, double(settings_.uv_width));
+	putBytes(state, double(settings_.uv_rotation));
+	putBytes(state, double(settings_.piece_length));
+	putBytes(state, double(settings_.output));
+	putBytes(state, double(settings_.decal_lift));
+	putBytes(state, double(settings_.ground.surface_types));
+	putBytes(state, double(settings_.ground.only_immovable));
+	putBytes(state, double(settings_.ground.only_intersection));
+	putBytes(state, double(settings_.inner_round));
+	putBytes(state, double(settings_.roll));
+	putBytes(state, double(settings_.side_offset));
 	if (settings_.output == ROAD_OUTPUT_BENT)
 	{
-		put(state, double(settings_.bend_merge_materials));
-		put(state, double(settings_.bend_forward));
-		put(state, double(settings_.bend_up));
+		putBytes(state, double(settings_.bend_merge_materials));
+		putBytes(state, double(settings_.bend_mesh_angle));
+		putBytes(state, double(settings_.bend_forward));
+		putBytes(state, double(settings_.bend_up));
 		for (const RoadBendPart &part : settings_.bend_parts)
 		{
 			state.append(part.source.toUtf8()).append('|');
-			put(state, double(part.role));
-			put(state, double(part.count));
-			put(state, Math::Vec3(part.scale));
-			put(state, part.auto_length ? -1.0 : double(part.length));
+			putBytes(state, double(part.role));
+			putBytes(state, double(part.count));
+			putBytes(state, Math::Vec3(part.scale));
+			putBytes(state, part.auto_length ? -1.0 : double(part.length));
 		}
 	}
 	for (int i = 0, num = path->getNumChildren(); i < num; ++i)
 	{
 		const NodePtr point = path->getChild(i);
-		put(state, point->getWorldPosition());
-		put(state, double(isCornerPoint(point)));
-		put(state, double(isPointFlag(point, CURVE_OFF_GROUND_DATA)));
-		put(state, Math::Vec3(point->getWorldTransform().getColumn3(2)));
-		put(state, point_width(point));
+		putBytes(state, point->getWorldPosition());
+		putBytes(state, double(isCornerPoint(point)));
+		putBytes(state, double(isPointFlag(point, CURVE_OFF_GROUND_DATA)));
+		putBytes(state, Math::Vec3(point->getWorldTransform().getColumn3(2)));
+		putBytes(state, point_width(point));
 	}
 	return state;
 }
@@ -1605,7 +1574,7 @@ void RoadBuilder::ground_heights(const QVector<Math::Vec3> &points, QVector<doub
 			for (int k = 0; k < size; ++k)
 			{
 				heights[missing[first + k]] = batch[k]->isIntersection() ? double(batch[k]->getPosition().z)
-					: std::numeric_limits<double>::quiet_NaN();
+					: NO_GROUND;
 			}
 		}
 	} else
@@ -1619,7 +1588,7 @@ void RoadBuilder::ground_heights(const QVector<Math::Vec3> &points, QVector<doub
 			const Math::Vec3 above = points[i] + Math::Vec3(0.0, 0.0, SNAP_UP);
 			const Math::Vec3 below = points[i] - Math::Vec3(0.0, 0.0, SNAP_DOWN);
 			const SurfaceHit hit = raycastSurface(above, below, settings_.ground, ignore);
-			heights[i] = hit.found ? double(hit.point.z) : std::numeric_limits<double>::quiet_NaN();
+			heights[i] = hit.found ? double(hit.point.z) : NO_GROUND;
 		}
 	}
 
@@ -1821,7 +1790,7 @@ void RoadBuilder::rebuild_grid(bool on_ground)
 			// No ground under the vertex: it stays at the height of the curve.
 			const double height = heights[next_height++];
 			const Math::Vec3 on_ground(vertex.x, vertex.y,
-				Math::Scalar((std::isnan(height) ? double(vertex.z) : height) + ground_lift));
+				Math::Scalar((no_ground(height) ? double(vertex.z) : height) + ground_lift));
 			vertex = on_curve + (on_ground - on_curve) * Math::Scalar(ground);
 		}
 	}
@@ -1898,48 +1867,48 @@ bool RoadBuilder::isOutdated() const
 	if (!hasRoad() || getNumPieces() == 0)
 		return false;
 	const QByteArray hash = QCryptographicHash::hash(snapshot(), QCryptographicHash::Md5).toHex();
-	return data_string(root_, STATE_DATA).toUtf8() != hash;
+	return dataString(root_, STATE_DATA).toUtf8() != hash;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // Material and folder.
 ////////////////////////////////////////////////////////////////////////////////
-bool RoadBuilder::takeSelectedMaterial()
+bool RoadBuilder::takeMaterial(const Vector<UGUID> &guids)
 {
 	if (!hasRoad())
 	{
 		report(MSG_WARNING, uiText("Create a road or select an existing one first.", "Сначала создайте дорогу или выделите существующую."));
 		return false;
 	}
-
-	const ::UnigineEditor::SelectorGUIDs *selector = Selection::getSelectorRuntimes();
-	if (selector)
+	for (const UGUID &guid : guids)
 	{
-		for (const UGUID &guid : selector->getGUIDs())
-		{
-			// A .mat asset, or a material made by the import of another asset.
-			UGUID file_guid;
-			const String asset_path = AssetManager::getAssetPathFromGUID(guid);
-			if (!asset_path.empty() && QFileInfo(QString::fromUtf8(asset_path.get())).suffix().toLower() == QLatin1String("mat"))
-				file_guid = AssetManager::getAssetGUIDFromPath(asset_path);
-			else if (extension_of(guid) == QLatin1String("mat"))
-				file_guid = guid;
-			const MaterialPtr material = file_guid.isValid() ? Materials::findMaterialByFileGUID(file_guid) : MaterialPtr();
-			if (material)
-				return take_material(material);
-		}
+		// A .mat asset, or a material made by the import of another asset, or a material
+		// of the Materials window.
+		UGUID file_guid;
+		const String asset_path = AssetManager::getAssetPathFromGUID(guid);
+		if (!asset_path.empty() && QFileInfo(QString::fromUtf8(asset_path.get())).suffix().toLower() == QLatin1String("mat"))
+			file_guid = AssetManager::getAssetGUIDFromPath(asset_path);
+		else if (extensionOf(guid) == QLatin1String("mat"))
+			file_guid = guid;
+		MaterialPtr material = file_guid.isValid() ? Materials::findMaterialByFileGUID(file_guid) : MaterialPtr();
+		if (!material)
+			material = Materials::findMaterialByGUID(guid);
+		if (material)
+			return take_material(material);
 	}
-	// A material picked in the Materials window.
-	if (const ::UnigineEditor::SelectorGUIDs *materials = Selection::getSelectorMaterials())
-	{
-		for (const UGUID &guid : materials->getGUIDs())
-		{
-			if (const MaterialPtr material = Materials::findMaterialByGUID(guid))
-				return take_material(material);
-		}
-	}
-	report(MSG_WARNING, uiText("Select a material in the Asset Browser first.", "Сначала выберите материал в Asset Browser."));
+	report(MSG_WARNING, guids.empty() ? uiText("Select a material in the Asset Browser first.", "Сначала выделите материал в Asset Browser.")
+		: uiText("That is not a material: pick a material asset.", "Это не материал: выберите ассет материала."));
 	return false;
+}
+
+bool RoadBuilder::showMaterial() const
+{
+	const UGUID file = guidOf(settings_.material);
+	if (!hasRoad() || !file.isValid())
+		return false;
+	const String path = FileSystem::getVirtualPath(file);
+	const UGUID asset = path.empty() ? UGUID() : AssetManager::getAssetGUIDFromPath(path);
+	return showAssetInBrowser(asset.isValid() ? asset : file);
 }
 
 bool RoadBuilder::take_material(const MaterialPtr &material)
@@ -1995,12 +1964,47 @@ void RoadBuilder::apply_decal_settings()
 	for (int i = 0, num = holder->getNumChildren(); i < num; ++i)
 	{
 		const NodePtr piece = holder->getChild(i);
+		if (piece->getType() == Node::OBJECT_MESH_STATIC)
+		{
+			apply_distances(checked_ptr_cast<Object>(piece));
+			continue;
+		}
 		if (piece->getType() != Node::DECAL_MESH)
 			continue;
 		DecalMeshPtr decal = checked_ptr_cast<DecalMesh>(piece);
 		decal->setRadius(settings_.decal_depth);
 		decal->setMaxVisibleDistance(settings_.decal_visible_distance > 0.0f ? settings_.decal_visible_distance : Math::Consts::INF);
 		decal->setMaxFadeDistance(settings_.decal_fade_distance);
+	}
+	if (preview_ && !preview_.isDeleted())
+		apply_distances(preview_);
+}
+
+void RoadBuilder::apply_distances(const ObjectPtr &object) const
+{
+	if (!object)
+		return;
+	const bool bent = settings_.output == ROAD_OUTPUT_BENT;
+	const QHash<QString, BendSource::Surface> surfaces = bent ? bend_surfaces() : QHash<QString, BendSource::Surface>();
+	for (int surface = 0; surface < object->getNumSurfaces(); ++surface)
+	{
+		// What the surface would be seen to without the setting: always for a grid, the
+		// LOD distance of the asset for a bent mesh.
+		float visible = Math::Consts::INF;
+		float fade = 0.0f;
+		const auto it = surfaces.constFind(QString::fromUtf8(object->getSurfaceName(surface)));
+		if (it != surfaces.constEnd())
+		{
+			visible = it->max_visible;
+			fade = it->max_fade;
+		}
+		if (settings_.decal_visible_distance > 0.0f && settings_.decal_visible_distance < visible)
+		{
+			visible = settings_.decal_visible_distance;
+			fade = settings_.decal_fade_distance;
+		}
+		object->setMaxVisibleDistance(visible, surface);
+		object->setMaxFadeDistance(fade, surface);
 	}
 }
 
@@ -2041,7 +2045,7 @@ QString RoadBuilder::getMaterialName() const
 		}
 	}
 
-	const UGUID guid = guid_of(settings_.material);
+	const UGUID guid = guidOf(settings_.material);
 	if (!guid.isValid())
 		return QString();
 	const QString path = QString::fromUtf8(FileSystem::getVirtualPath(guid).get());
@@ -2065,14 +2069,14 @@ QString RoadBuilder::getFolder() const
 
 bool RoadBuilder::hasGeneratedFiles() const
 {
-	return hasRoad() && !data_string(root_, FILES_DATA).isEmpty();
+	return hasRoad() && !dataString(root_, FILES_DATA).isEmpty();
 }
 
 bool RoadBuilder::showGeneratedFiles() const
 {
 	if (!hasRoad())
 		return false;
-	for (const QString &file : data_string(root_, FILES_DATA).split(QLatin1Char('\n'), Qt::SkipEmptyParts))
+	for (const QString &file : dataString(root_, FILES_DATA).split(QLatin1Char('\n'), Qt::SkipEmptyParts))
 	{
 		if (showAssetInBrowser(AssetManager::getAssetGUIDFromPath(file.toUtf8().constData())))
 			return true;
@@ -2082,7 +2086,7 @@ bool RoadBuilder::showGeneratedFiles() const
 
 bool RoadBuilder::setFolderFromDisk(const QString &absolute_path)
 {
-	const QString data = QDir::cleanPath(data_path());
+	const QString data = QDir::cleanPath(dataPath());
 	const QString folder = QDir::cleanPath(QDir::fromNativeSeparators(absolute_path));
 	if (!folder.startsWith(data + QLatin1Char('/'), Qt::CaseInsensitive) && folder.compare(data, Qt::CaseInsensitive) != 0)
 	{
@@ -2122,7 +2126,7 @@ MeshPtr RoadBuilder::make_road_mesh(int piece, Math::Vec3 &pivot) const
 	pivot = (minimum + maximum) * Math::Scalar(0.5);
 
 	MeshPtr mesh = Mesh::create();
-	const int surface = mesh->addSurface(file_name_of(getRoadName()).toUtf8().constData());
+	const int surface = mesh->addSurface(fileNameOf(getRoadName(), QString::fromUtf8(ROOT_NODE_NAME)).toUtf8().constData());
 	for (int i = first; i <= last; ++i)
 	{
 		for (int j = 0; j <= grid_.columns; ++j)
@@ -2210,32 +2214,11 @@ bool RoadBuilder::generate()
 	// a road that is renamed or regenerated overwrites its own files. A copy of a road
 	// made by the editor has the data of the original: it gets files of its own and
 	// leaves those of the original.
-	const QString owner = data_string(root_, OWNER_DATA);
-	const bool own_files = owner.isEmpty() || owner == QString::number(root_->getID());
-	const QStringList old_files = own_files ? data_string(root_, FILES_DATA).split(QLatin1Char('\n'), Qt::SkipEmptyParts) : QStringList();
+	bool own_files = false;
+	const QStringList old_files = ownGeneratedFiles(root_, road_generated_data(), &own_files);
 	const int num_pieces = bent ? int(bend_.piece_starts.size()) : int(grid_.piece_starts.size());
-	// A name is free when none of the files the road is to write is there, or the ones
-	// that are there are files of this very road: a file of anything else is never
-	// written over.
-	const auto free_name = [&](const QString &name) {
-		for (int piece = 0; piece < num_pieces; ++piece)
-		{
-			const QString file = asset_file(folder, name, piece);
-			if (old_files.contains(file))
-				continue;
-			if (AssetManager::isExist(file.toUtf8().constData()) || QFileInfo::exists(data_path() + file))
-				return false;
-		}
-		return true;
-	};
-	QString base = own_files && data_string(root_, FOLDER_DATA) == folder ? data_string(root_, BASE_NAME_DATA) : QString();
-	if (base.isEmpty() || !free_name(base))
-	{
-		const QString name = file_name_of(getRoadName());
-		base = name;
-		for (int i = 2; !free_name(base); ++i)
-			base = QString::fromUtf8("%1_%2").arg(name).arg(i);
-	}
+	const QString base = pickBaseName(root_, road_generated_data(), own_files, folder,
+		fileNameOf(getRoadName(), QString::fromUtf8(ROOT_NODE_NAME)), num_pieces, old_files);
 
 	const bool decal = settings_.output == ROAD_OUTPUT_DECAL;
 	const Node::TYPE piece_type = decal ? Node::DECAL_MESH : Node::OBJECT_MESH_STATIC;
@@ -2248,11 +2231,11 @@ bool RoadBuilder::generate()
 		for (const RoadBendPart &part : settings_.bend_parts)
 			kind += QLatin1Char(':') + part.source;
 	}
-	const QString old_kind = data_string(root_, KIND_DATA);
+	const QString old_kind = dataString(root_, KIND_DATA);
 	const bool same_kind = old_kind == kind || (old_kind.isEmpty() && !bent);
 	// The material of a piece made from scratch: the one of the road if it suits the
 	// kind of the pieces, else the base one.
-	MaterialPtr material = Materials::findMaterialByFileGUID(guid_of(settings_.material));
+	MaterialPtr material = Materials::findMaterialByFileGUID(guidOf(settings_.material));
 	if (!material_suits(material, piece_type))
 		material = Materials::findManualMaterial(decal ? "Unigine::decal_base" : "Unigine::mesh_base");
 
@@ -2273,8 +2256,13 @@ bool RoadBuilder::generate()
 		if (!pattern)
 			pattern = child;
 	}
+	// What the pieces have now, before their files are written anew: the surfaces of the
+	// old mesh are still there to be read.
+	QVector<PieceState> old_states;
+	for (const NodePtr &piece : old_pieces)
+		old_states.append(PieceState::of(piece));
 	Vector<NodePtr> created;
-	Vector<NodePtr> kept;
+	QVector<NodePtr> kept;
 	QVector<Math::Mat4> kept_transforms;
 	QVector<PieceState> kept_states;
 	QStringList files;
@@ -2290,36 +2278,19 @@ bool RoadBuilder::generate()
 	}
 
 	// The files written over are a part of the undo step: Ctrl+Z gives them back what
-	// they had.
+	// they had. All the files are written first, and the scene is changed only when every
+	// one of them is; the editor is kept from picking the files up on its own meanwhile.
 	SetFilesAction *file_action = new SetFilesAction;
-
-	// Then all the files are written, and the scene is changed only when every one of
-	// them is: if one can not be written, the files written so far get back what they
-	// had, the new ones are removed, and the scene stays as it was. The editor is kept
-	// from picking the files up on its own while they are written.
 	AssetManager::blockAutoRefresh();
-	QStringList fresh;
 	QVector<bool> existed;
-	for (int piece = 0; piece < num_pieces; ++piece)
 	{
-		const QString file = asset_file(folder, base, piece);
-		existed.append(AssetManager::isAsset(file.toUtf8().constData()));
-		if (QFileInfo::exists(data_path() + file))
-			file_action->before(file);
-		else
-			fresh.append(file);
-		if (!meshes[piece]->save((data_path() + file).toUtf8().constData()))
+		QString error;
+		if (!writeMeshFiles(folder, base, meshes, file_action, files, existed, error))
 		{
-			file_action->undo();
-			delete file_action;
-			for (const QString &written : fresh)
-				QFile::remove(data_path() + written);
 			AssetManager::unblockAutoRefresh();
-			report(MSG_ERROR, uiText("Could not save %1. Nothing was changed.", "Не удалось сохранить %1. Ничего не изменено.").arg(file));
+			report(MSG_ERROR, error);
 			return false;
 		}
-		file_action->after(file);
-		files.append(file);
 	}
 
 	for (int piece = 0; piece < num_pieces; ++piece)
@@ -2342,7 +2313,7 @@ bool RoadBuilder::generate()
 			// it had keep what was set on them by hand; a bent piece that got a surface
 			// it did not have gives it the settings of the asset.
 			const NodePtr node = old_pieces[piece];
-			const PieceState before = PieceState::of(node);
+			const PieceState &before = old_states[piece];
 			set_mesh_path(node, mesh_path);
 			if (decal)
 				checked_ptr_cast<DecalMesh>(node)->setRadius(settings_.decal_depth);
@@ -2403,8 +2374,14 @@ bool RoadBuilder::generate()
 	}
 
 	// The depth and the distances of the decals are those of the settings, also on the
-	// pieces that were there and on the new ones.
-	if (decal)
+	// pieces that were there and on the new ones; the distances of the meshes too.
+	if (!decal)
+	{
+		for (const NodePtr &node : created)
+			apply_distances(checked_ptr_cast<Object>(node));
+		for (const NodePtr &node : kept)
+			apply_distances(checked_ptr_cast<Object>(node));
+	} else
 	{
 		for (const NodePtr &node : created)
 		{
@@ -2419,12 +2396,6 @@ bool RoadBuilder::generate()
 			decal_mesh->setMaxFadeDistance(settings_.decal_fade_distance);
 		}
 	}
-
-	// What the pieces that stay had - their meshes, names, surfaces - comes back with
-	// Ctrl+Z.
-	SetPiecesAction *piece_action = new SetPiecesAction;
-	for (int i = 0; i < kept.size(); ++i)
-		piece_action->add(kept[i], kept_states[i]);
 
 	// What is in "mesh" and is not a piece of the new road: the pieces the road has
 	// got shorter by, and the pieces of the other kind.
@@ -2443,46 +2414,13 @@ bool RoadBuilder::generate()
 			removed.append(child);
 	}
 
-	// The files of the previous Generate this one has not written again (the road got
-	// shorter, or went to another folder) are kept: the pieces Ctrl+Z brings back use
-	// them. They stay in the list of the road, so Remove Road takes them away.
-	QStringList all_files = files;
-	for (const QString &file : old_files)
-	{
-		if (!all_files.contains(file) && AssetManager::isAsset(file.toUtf8().constData()))
-			all_files.append(file);
-	}
-
-	// One undo step: the files written over, the pieces that stay moved, the new ones
-	// in, the extra ones out, and what the road remembers of its Generate.
-	using namespace ::UnigineEditor;
-	Undo::begin();
-	if (file_action->isEmpty())
-		delete file_action;
-	else
-		Undo::apply(file_action);
-	if (piece_action->isEmpty())
-		delete piece_action;
-	else
-		Undo::apply(piece_action);
-	for (int i = 0; i < kept.size(); ++i)
-	{
-		if (kept[i]->getWorldTransform() != kept_transforms[i])
-			Undo::apply(new SetNodeTransformAction(kept[i], kept_transforms[i]));
-	}
-	if (created.size())
-		Undo::apply(new CreateNodesAction(created));
-	if (removed.size())
-		Undo::apply(new RemoveNodesAction(removed));
+	// One undo step: the files written over with the pieces that stay, the pieces moved,
+	// the new ones in, the extra ones out, and what the road remembers of its Generate.
 	SetNodeDataAction *data_action = new SetNodeDataAction;
-	data_action->set(root_, FILES_DATA, all_files.join(QLatin1Char('\n')).toUtf8());
-	data_action->set(root_, BASE_NAME_DATA, base.toUtf8());
-	data_action->set(root_, FOLDER_DATA, folder.toUtf8());
+	setGeneratedData(data_action, root_, road_generated_data(), generatedFileList(files, old_files), base, folder);
 	data_action->set(root_, STATE_DATA, QCryptographicHash::hash(snapshot(), QCryptographicHash::Md5).toHex());
 	data_action->set(root_, KIND_DATA, kind.toUtf8());
-	data_action->set(root_, OWNER_DATA, QByteArray::number(root_->getID()));
-	SetNodeDataAction::push(data_action, false);
-	Undo::commit();
+	commitGenerate(file_action, kept, kept_states, kept_transforms, created, removed, data_action);
 
 	report(MSG_INFO, uiText("Generated %1 pieces, %2 triangles, in %3.", "Создано кусков: %1, треугольников: %2, папка: %3.")
 		.arg(kept.size() + created.size()).arg(bent ? bend_.triangles : grid_.numTriangles())
@@ -2500,7 +2438,7 @@ bool RoadBuilder::eventFilter(QObject *watched, QEvent *event)
 		return false;
 
 	if (event->type() == QEvent::KeyPress && isAddingPoints()
-		&& static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)
+		&& static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape && isEscapeFree(watched))
 	{
 		setAddingPoints(false);
 		return true;
@@ -2680,7 +2618,7 @@ void RoadBuilder::draw() const
 			QVector<Math::Vec3> point(1, points.positions[i]);
 			QVector<double> height;
 			ground_heights(point, height);
-			if (!std::isnan(height[0]))
+			if (!no_ground(height[0]))
 			{
 				Visualizer::renderLine3D(points.positions[i],
 					Math::Vec3(points.positions[i].x, points.positions[i].y, Math::Scalar(height[0])), height_color, 0.0f, false);
@@ -2736,6 +2674,41 @@ bool RoadBuilder::addSelectedBendParts()
 		setSettings(settings);
 	report(failed.isEmpty() ? MSG_INFO : MSG_WARNING, failed.join(QLatin1Char('\n')));
 	return failed.isEmpty();
+}
+
+bool RoadBuilder::replaceBendPart(int part, const Vector<UGUID> &guids)
+{
+	if (part < 0 || part >= settings_.bend_parts.size())
+		return false;
+	PlaceableAsset asset;
+	if (!resolveSelection(guids, asset))
+	{
+		report(MSG_WARNING, uiText("That is not a mesh: pick a .mesh, a .node or a model.", "Это не меш: выберите .mesh, .node или модель."));
+		return false;
+	}
+	RoadSettings settings = settings_;
+	RoadBendPart &bend_part = settings.bend_parts[part];
+	bend_part.source = QString::fromUtf8(asset.path.get());
+	bend_part.source_kind = int(asset.kind);
+	bend_part.source_name = QFileInfo(asset.name).completeBaseName();
+	bend_part.auto_length = true;
+	QString note;
+	if (!bend_sources_.contains(bend_part.source))
+	{
+		BendSource source;
+		QString error;
+		if (!BendSource::load(asset, source, error))
+		{
+			report(MSG_WARNING, QString::fromUtf8("%1: %2").arg(bend_part.source_name, error));
+			return false;
+		}
+		if (!source.note.isEmpty())
+			note = QString::fromUtf8("%1: %2").arg(bend_part.source_name, source.note);
+		bend_sources_.insert(bend_part.source, source);
+	}
+	setSettings(settings);
+	report(note.isEmpty() ? MSG_INFO : MSG_WARNING, note);
+	return true;
 }
 
 void RoadBuilder::removeBendPart(int part)
@@ -2975,7 +2948,7 @@ void RoadBuilder::add_bend_copies(int first, int end, const Math::Vec3 &pivot, c
 		if (!bounds.contains(copy.part))
 			bounds.insert(copy.part, bendBounds(*source, bend_axes(copy.part)));
 		bendCopy(*source, bend_axes(copy.part), bounds.value(copy.part), names[copy.part], copy.start, copy.fit, frame,
-			pivot, mesh);
+			pivot, mesh, settings_.bend_mesh_angle);
 	}
 }
 
@@ -3104,11 +3077,35 @@ void RoadBuilder::rebuild_bend(const CurvePoints &points, const QVector<double> 
 		add(k, middle_fit);
 	if (end >= 0)
 		add(end, ends_fit);
+	// Mesh Angle cuts the copies where the curve turns: their share of its turn adds the
+	// triangles of the cuts.
+	if (settings_.bend_mesh_angle > 0.0f && bend.length > 1e-9)
+	{
+		double turn = 0.0;
+		for (int i = 0; i + 1 < bend.tangents.size(); ++i)
+		{
+			const double cosine = qBound(-1.0, double(Math::dot(bend.tangents[i], bend.tangents[i + 1])), 1.0);
+			turn += std::acos(cosine) * Math::Consts::RAD2DEG_D;
+		}
+		QHash<int, QPair<int, double>> by_part;
+		for (const RoadBendCopy &copy : bend.copies)
+		{
+			by_part[copy.part].first += 1;
+			by_part[copy.part].second += copy.length;
+		}
+		triangles = 0;
+		for (auto it = by_part.constBegin(); it != by_part.constEnd(); ++it)
+		{
+			const int k = it.key();
+			triangles += bentTriangles(bend_sources_.value(settings_.bend_parts[k].source), bend_axes(k), it.value().first,
+				turn * it.value().second / bend.length, settings_.bend_mesh_angle);
+		}
+	}
 	if (triangles > MAX_BEND_TRIANGLES)
 	{
 		bend.copies.clear();
-		report(MSG_WARNING, uiText("The copies of the meshes would have more than %1 triangles: make the pattern longer or the curve shorter.",
-			"У копий мешей было бы больше %1 треугольников: сделайте паттерн длиннее или кривую короче.").arg(MAX_BEND_TRIANGLES));
+		report(MSG_WARNING, uiText("The copies of the meshes would have more than %1 triangles: make the pattern longer, the curve shorter or Mesh Angle larger.",
+			"У копий мешей было бы больше %1 треугольников: сделайте паттерн длиннее, кривую короче или «Угол меша» больше.").arg(MAX_BEND_TRIANGLES));
 		return;
 	}
 	bend.pattern_copies = int(sequence.size());
@@ -3241,6 +3238,7 @@ void RoadBuilder::update_preview()
 		preview_->setWorldTransform(Math::translate(pivot));
 		// The materials of the assets; the preview is not picked by the clicks.
 		apply_bend_materials(preview_);
+		apply_distances(preview_);
 		for (int surface = 0; surface < preview_->getNumSurfaces(); ++surface)
 		{
 			preview_->setIntersection(false, surface);
@@ -3254,7 +3252,7 @@ void RoadBuilder::update_preview()
 
 bool RoadBuilder::is_up_to_date() const
 {
-	return data_string(root_, STATE_DATA).toUtf8() == QCryptographicHash::hash(grid_state_, QCryptographicHash::Md5).toHex();
+	return dataString(root_, STATE_DATA).toUtf8() == QCryptographicHash::hash(grid_state_, QCryptographicHash::Md5).toHex();
 }
 
 void RoadBuilder::setHideOutdated(bool hide)

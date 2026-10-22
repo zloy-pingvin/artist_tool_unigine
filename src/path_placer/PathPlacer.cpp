@@ -1,5 +1,7 @@
 #include "PathPlacer.h"
+#include "UiHelpers.h"
 #include "Localization.h"
+#include "NodeData.h"
 #include "UndoActions.h"
 
 #include <editor/UnigineActions.h>
@@ -191,24 +193,6 @@ bool advance(const QVector<Math::Vec3> &samples, Cursor &cursor, double distance
 		return true;
 	}
 	return false;
-}
-
-void put(QByteArray &bytes, double value)
-{
-	bytes.append(reinterpret_cast<const char *>(&value), sizeof(value));
-}
-
-void put(QByteArray &bytes, const Math::Vec3 &value)
-{
-	put(bytes, double(value.x));
-	put(bytes, double(value.y));
-	put(bytes, double(value.z));
-}
-
-void put(QByteArray &bytes, const Math::Mat4 &value)
-{
-	for (int column = 0; column < 4; ++column)
-		put(bytes, Math::Vec3(value.getColumn3(column)));
 }
 
 } // namespace
@@ -793,7 +777,7 @@ bool PathPlacer::eventFilter(QObject *watched, QEvent *event)
 		return false;
 
 	if (event->type() == QEvent::KeyPress && isAddingPoints()
-		&& static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)
+		&& static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape && isEscapeFree(watched))
 	{
 		setAddingPoints(false);
 		return true;
@@ -939,7 +923,7 @@ float PathPlacer::object_length(const NodePtr &object) const
 	return settings_.step;
 }
 
-void PathPlacer::rearrange()
+void PathPlacer::rearrange(bool undoable)
 {
 	const NodePtr objects = objects_node();
 	if (!objects)
@@ -955,6 +939,16 @@ void PathPlacer::rearrange()
 		lengths[i] = object_length(ordered[i]);
 
 	const QVector<Slot> placed = compute_slots(curve, lengths, false);
+	// The objects moved, as one step the user can undo, with the scales they remember.
+	Vector<NodePtr> moved;
+	Vector<Math::Mat4> moved_to;
+	SetNodeDataAction *scales = undoable ? new SetNodeDataAction : nullptr;
+	const auto set_scale = [&scales](const NodePtr &object, const QByteArray &value) {
+		if (scales)
+			scales->set(object, SCALE_DATA, value);
+		else
+			object->setData(SCALE_DATA, value.constData());
+	};
 	for (int i = 0; i < placed.size(); ++i)
 	{
 		const NodePtr object = ordered[i];
@@ -983,15 +977,33 @@ void PathPlacer::rearrange()
 		{
 			if (!saved_scale || !*saved_scale)
 			{
-				object->setData(SCALE_DATA, QByteArray::number(double(scale.x)).append(' ')
+				set_scale(object, QByteArray::number(double(scale.x)).append(' ')
 					.append(QByteArray::number(double(scale.y))).append(' ')
-					.append(QByteArray::number(double(scale.z))).constData());
+					.append(QByteArray::number(double(scale.z))));
 			}
 		} else if (saved_scale && *saved_scale)
-			object->setData(SCALE_DATA, "");
+			set_scale(object, QByteArray());
 
-		object->setWorldTransform(slot_transform(slot, lengths[i], scale));
+		const Math::Mat4 transform = slot_transform(slot, lengths[i], scale);
+		if (!undoable)
+			object->setWorldTransform(transform);
+		else if (object->getWorldTransform() != transform)
+		{
+			moved.append(object);
+			moved_to.append(transform);
+		}
 	}
+	if (scales && (!moved.empty() || !scales->isEmpty()))
+	{
+		using namespace ::UnigineEditor;
+		Undo::begin();
+		SetNodeDataAction::push(scales, false);
+		scales = nullptr;
+		for (int i = 0; i < moved.size(); ++i)
+			Undo::apply(new SetNodeTransformAction(moved[i], moved_to[i]));
+		Undo::commit();
+	}
+	delete scales;
 
 	unplaced_ = curve.samples.size() < 2 ? 0 : count - int(placed.size());
 	arranged_state_ = snapshot();
@@ -1008,31 +1020,31 @@ QByteArray PathPlacer::snapshot() const
 	if (!path || !objects)
 		return state;
 
-	put(state, double(isOldCurve()));
-	put(state, double(settings_.step));
-	put(state, double(settings_.forward_axis));
-	put(state, double(settings_.up_axis));
-	put(state, double(settings_.closed));
-	put(state, double(settings_.yaw_only));
-	put(state, double(settings_.skew));
-	put(state, double(settings_.snap_to_ground));
-	put(state, double(settings_.ground_offset));
-	put(state, double(settings_.ground.surface_types));
-	put(state, double(settings_.ground.only_immovable));
-	put(state, double(settings_.ground.only_intersection));
+	putBytes(state, double(isOldCurve()));
+	putBytes(state, double(settings_.step));
+	putBytes(state, double(settings_.forward_axis));
+	putBytes(state, double(settings_.up_axis));
+	putBytes(state, double(settings_.closed));
+	putBytes(state, double(settings_.yaw_only));
+	putBytes(state, double(settings_.skew));
+	putBytes(state, double(settings_.snap_to_ground));
+	putBytes(state, double(settings_.ground_offset));
+	putBytes(state, double(settings_.ground.surface_types));
+	putBytes(state, double(settings_.ground.only_immovable));
+	putBytes(state, double(settings_.ground.only_intersection));
 
 	for (int i = 0, num = path->getNumChildren(); i < num; ++i)
 	{
 		const NodePtr point = path->getChild(i);
-		put(state, point->getWorldPosition());
-		put(state, double(isCornerPoint(point)));
+		putBytes(state, point->getWorldPosition());
+		putBytes(state, double(isCornerPoint(point)));
 	}
 	for (int i = 0, num = objects->getNumChildren(); i < num; ++i)
 	{
 		const NodePtr object = objects->getChild(i);
-		put(state, double(object->getID()));
-		put(state, double(object_length(object)));
-		put(state, object->getWorldTransform());
+		putBytes(state, double(object->getID()));
+		putBytes(state, double(object_length(object)));
+		putBytes(state, object->getWorldTransform());
 	}
 	return state;
 }
@@ -1133,6 +1145,25 @@ bool PathPlacer::addPatternAssets()
 	}
 	// New assets join the repeated part, above the end.
 	keep_roles_in_order(pattern_);
+	save_settings();
+	report(MSG_INFO, QString());
+	notify_changed();
+	return true;
+}
+
+bool PathPlacer::replacePatternAsset(int index, const Vector<UGUID> &guids)
+{
+	if (index < 0 || index >= pattern_.size())
+		return false;
+	PlaceableAsset asset;
+	if (!resolveSelection(guids, asset))
+	{
+		report(MSG_WARNING, uiText("That can not be placed: pick a .mesh, a .node or a model.",
+			"Это нельзя расставить: выберите .mesh, .node или модель."));
+		return false;
+	}
+	pattern_[index].asset = asset;
+	pattern_[index].length = measure_length(asset);
 	save_settings();
 	report(MSG_INFO, QString());
 	notify_changed();

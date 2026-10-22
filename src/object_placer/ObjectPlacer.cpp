@@ -1,4 +1,5 @@
 #include "ObjectPlacer.h"
+#include "UiHelpers.h"
 #include "Localization.h"
 #include "PlaceableAsset.h"
 #include "ViewportPicking.h"
@@ -167,7 +168,8 @@ void ObjectPlacer::setParentNode(const NodePtr &node)
 
 NodePtr ObjectPlacer::getParentNode() const
 {
-	return parent_.isDeleted() ? NodePtr() : parent_;
+	// A node removed with Ctrl+Z or Delete is kept by the editor for undo: not a parent.
+	return isNodeAlive(parent_) ? parent_ : NodePtr();
 }
 
 void ObjectPlacer::setEnabled(bool enabled)
@@ -217,7 +219,7 @@ bool ObjectPlacer::eventFilter(QObject *watched, QEvent *event)
 	switch (event->type())
 	{
 		case QEvent::KeyPress:
-			if (static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)
+			if (static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape && isEscapeFree(watched))
 			{
 				setEnabled(false);
 				return true;
