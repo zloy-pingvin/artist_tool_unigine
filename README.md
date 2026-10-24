@@ -30,10 +30,10 @@ For a manual installation, copy the plugin folder into your project so the binar
 <project>/bin/plugins/zloy_pingvin/artist_tool/
 ```
 
-Copy the default materials and textures of the plugin too: the [`data/zloy_pingvin/artist_tool/`](data/zloy_pingvin/artist_tool) folder of this repository goes to the same path in the data of your project, with its `.meta` files (they keep the GUIDs the tools look the materials up by):
+Copy the default materials and textures of the plugin too: the [`data/plugins/zloy_pingvin/artist_tool/`](data/plugins/zloy_pingvin/artist_tool) folder of this repository goes to the same path in the data of your project, with its `.meta` files (they keep the GUIDs the tools look the materials up by):
 
 ```text
-<project>/data/zloy_pingvin/artist_tool/
+<project>/data/plugins/zloy_pingvin/artist_tool/
 ```
 
 Use binaries matching your editor's platform, precision (float or double), and build (Release or Debug). Start or restart the editor, then open **Windows → Artist Tools**.

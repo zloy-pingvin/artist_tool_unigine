@@ -256,7 +256,7 @@ bool material_suits(const MaterialPtr &material, Node::TYPE piece_type)
 	return material && material->isNodeTypeSupported(piece_type);
 }
 
-// The materials that come with the plugin (data/zloy_pingvin/artist_tool/materials), the
+// The materials that come with the plugin (data/plugins/zloy_pingvin/artist_tool/materials), the
 // default ones of a road: a mesh and decals.
 const char MESH_MATERIAL_GUID[] = "54149052674c7d650318282c8bb2ba36a829f9b0"; // road_mesh
 const char DECAL_MATERIAL_GUID[] = "df8fd8c561164abea8d818a3801de3904828d8e9"; // road_decal

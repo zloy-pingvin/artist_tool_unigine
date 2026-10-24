@@ -172,7 +172,7 @@ NodePtr find_line_root(const NodePtr &node)
 	return NodePtr();
 }
 
-// The materials that come with the plugin (data/zloy_pingvin/artist_tool/materials), the
+// The materials that come with the plugin (data/plugins/zloy_pingvin/artist_tool/materials), the
 // default ones of the wires: crossed strips with alpha, and a ribbon or a tube.
 const char CROSS_MATERIAL_GUID[] = "1b923e266540a4cffb2e31fed6892161844c2f89"; // wire_alpha_blend
 const char SOLID_MATERIAL_GUID[] = "e8105cac207eefb516f037923dd087dfbc2d2962"; // wire_solid
