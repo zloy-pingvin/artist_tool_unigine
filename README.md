@@ -58,6 +58,8 @@ Enable **Normal Orientation** to follow the surface, or randomize rotation and s
 
 Move the points to reshape the path. With **Live Update** enabled, the objects follow. Use corner points for sharp turns, **Closed Loop** for a loop, and **Start / End** assets for things like end posts. Paths are saved with the world, so you can return to them later.
 
+![Fence following an editable curve in UNIGINE, with Path Placer control points visible](docs/images/path-placer.png)
+
 ### Make a road, path, or bent mesh
 
 In **Road**, click **New Road**, place points, and press **Esc**. Set the width, then choose **Mesh**, **Decal**, or **Bent Mesh**. Pick a material or source mesh and click **Generate**.
@@ -65,6 +67,11 @@ In **Road**, click **New Road**, place points, and press **Esc**. Set the width,
 Use per-point width and roll for widening sections and banked turns. **Lay On** selects the surface types used for ground snapping. **On Curve** excludes individual points from snapping, letting you raise sections for bridges and ramps. With a decal material using distance fade, raised sections can also create a gradual fade where the decal projects onto the ground. Generated meshes are saved to `roads/` beside the world, or to a folder you choose.
 
 Use a mesh material for **Mesh** and a decal material for **Decal**. Vertex-color controls provide masks for your material, and the viewport preview lets you inspect them. **Bent Mesh** supports repeating assets with separate start and end pieces.
+
+<img width="1367" height="802" alt="image" src="https://github.com/user-attachments/assets/7c896171-049a-4cbc-bf46-1af01f6d2637" />
+
+<img width="1297" height="538" alt="image" src="https://github.com/user-attachments/assets/1bedfa1e-0779-4fe8-9fb2-ab6cff377d26" />
+
 
 ### Hang wires between poles
 
@@ -76,6 +83,9 @@ Set **Sag** and **Random**, then choose **Cross**, **Ribbon**, **Tube**, or **Me
 
 Under **Advanced Settings**, **End Offset** moves both wire ends inward from their attachment points. This is useful when an attachment is at the center of a post and the cable should start at its edge. Click **Generate** to save the result.
 
+<img width="1267" height="868" alt="image" src="https://github.com/user-attachments/assets/c246bfe0-721b-4ed2-967e-9a668e9733f2" />
+
+
 ### Check scale and dimensions
 
 In **Measure**, choose **Ruler**, **Angle**, or **Person**, then click in the viewport to place the points. You can snap to surfaces and mesh vertices, lock to an axis with **X / Y / Z**, and copy measurements as text.
@@ -83,6 +93,9 @@ In **Measure**, choose **Ruler**, **Angle**, or **Person**, then click in the vi
 Tap and release **Ctrl** over the viewport to switch surface/vertex snapping. **Shift + X / Y / Z** locks to a plane; hold **Shift** while placing or dragging a point for slower cursor movement. In Person mode, the mouse wheel adjusts the figure's height.
 
 Enable the magnifier to see the area around the target point enlarged while placing or adjusting measurements. Use it together with snapping and slower cursor movement to align points precisely with object edges.
+
+<img width="1089" height="565" alt="image" src="https://github.com/user-attachments/assets/bbd42b6a-a2a5-4afd-9fc7-52573576f045" />
+
 
 ### Turn clutter into editable nodes
 
