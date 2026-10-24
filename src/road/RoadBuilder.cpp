@@ -135,6 +135,8 @@ const int FETCH_BATCH = 4096;
 const int MAX_DECAL_TRIANGLES = 10000;
 const double MIN_POINT_WIDTH = 0.01;
 const double MAX_POINT_WIDTH = 100.0;
+// The most quads the vertex colors are drawn with in the viewport in a frame.
+const int MAX_COLOR_VIEW_QUADS = 20000;
 // The most triangles the copies of a bent mesh may have all together.
 const int MAX_BEND_TRIANGLES = 1000000;
 
@@ -205,6 +207,11 @@ RoadSettings limited(RoadSettings settings)
 	settings.decal_fade_distance = qMax(settings.decal_fade_distance, 0.0f);
 	settings.inner_round = qMax(settings.inner_round, 0.0f);
 	settings.roll = qBound(-90.0f, settings.roll, 90.0f);
+	settings.color_edge = qMax(settings.color_edge, 0.0f);
+	settings.color_start_fade = qMax(settings.color_start_fade, 0.0f);
+	settings.color_end_fade = qMax(settings.color_end_fade, 0.0f);
+	settings.color_green = RoadGreenMode(qBound(int(ROAD_GREEN_POINT_TO_POINT), int(settings.color_green), int(ROAD_GREEN_TO_MIDDLE)));
+	settings.color_noise_size = qMax(settings.color_noise_size, 0.0f);
 	settings.bend_mesh_angle = qBound(0.0f, settings.bend_mesh_angle, 90.0f);
 	settings.bend_forward = AxisDirection(qBound(int(AXIS_X_POSITIVE), int(settings.bend_forward), int(AXIS_Z_NEGATIVE)));
 	settings.bend_up = AxisDirection(qBound(int(AXIS_X_POSITIVE), int(settings.bend_up), int(AXIS_Z_NEGATIVE)));
@@ -247,6 +254,31 @@ RoadSettings limited(RoadSettings settings)
 bool material_suits(const MaterialPtr &material, Node::TYPE piece_type)
 {
 	return material && material->isNodeTypeSupported(piece_type);
+}
+
+// The materials that come with the plugin (data/zloy_pingvin/artist_tool/materials), the
+// default ones of a road: a mesh and decals.
+const char MESH_MATERIAL_GUID[] = "54149052674c7d650318282c8bb2ba36a829f9b0"; // road_mesh
+const char DECAL_MATERIAL_GUID[] = "df8fd8c561164abea8d818a3801de3904828d8e9"; // road_decal
+
+// The material of the pieces when none is picked: the one that comes with the plugin, or
+// the base one if it is gone from the project.
+MaterialPtr default_road_material(bool decal)
+{
+	const MaterialPtr material = Materials::findMaterialByFileGUID(
+		guidOf(QString::fromUtf8(decal ? DECAL_MATERIAL_GUID : MESH_MATERIAL_GUID)));
+	if (material_suits(material, decal ? Node::DECAL_MESH : Node::OBJECT_MESH_STATIC))
+		return material;
+	return Materials::findManualMaterial(decal ? "Unigine::decal_base" : "Unigine::mesh_base");
+}
+
+// The name of a material as the Asset Browser shows it: of its asset, not of the runtime
+// file (named by GUID); a material without a file, by its own name.
+QString material_name(const MaterialPtr &material)
+{
+	const QString path = material->getFileGUID().isValid()
+		? QString::fromUtf8(FileSystem::getVirtualPath(material->getFileGUID()).get()) : QString();
+	return path.isEmpty() ? QString::fromUtf8(material->getManualName()) : QFileInfo(path).completeBaseName();
 }
 
 // The pieces of a road: the mesh nodes and the decals in its "mesh" node.
@@ -475,6 +507,10 @@ struct Station
 	double roll{0.0};
 	// The width there, a multiplier of Width; from one point to the next the same way.
 	double width{1.0};
+	// The span of the curve the row is on (from its point 'span' to the next one) and
+	// how far along it, by length: 0 - at the point, 1 - at the next one.
+	int span{0};
+	double along{0.0};
 };
 
 // The values of the points of the curve the rows take between them.
@@ -546,6 +582,8 @@ QVector<Station> place_stations(const Measured &m, const CurvePoints &points, co
 				const double to = points.off_ground[(span + 1) % points.count()] ? 0.0 : 1.0;
 				const double length = m.distances[last] - m.distances[first];
 				const double f = length > 1e-9 ? Math::clamp((station.distance - m.distances[first]) / length, 0.0, 1.0) : 0.0;
+				station.span = span;
+				station.along = f;
 				const double smooth = f * f * (3.0 - 2.0 * f);
 				station.ground = from + (to - from) * smooth;
 				const int next = (span + 1) % points.count();
@@ -572,6 +610,8 @@ QVector<Station> place_stations(const Measured &m, const CurvePoints &points, co
 	Station end;
 	end.position = m.samples.last();
 	end.distance = m.distances.last();
+	end.span = qMax(0, spans - 1);
+	end.along = 1.0;
 	if (points.closed && !stations.isEmpty())
 	{
 		end.position = stations.first().position;
@@ -599,6 +639,37 @@ QVector<Station> place_stations(const Measured &m, const CurvePoints &points, co
 // rows only. Where no row is close enough to a cut for the pieces to keep within that
 // length (long straight rows, a large Step), a row is put there: between two rows the
 // road is straight, so the new one changes nothing in its shape.
+// Puts a row at 'target' along the road, unless there is one within 'room' of it.
+// Between two rows the road is straight, so the new one changes nothing in its shape.
+void insert_station(QVector<Station> &stations, double target, double room)
+{
+	if (stations.size() < 2 || stations.size() >= MAX_STATIONS)
+		return;
+	int next = 1;
+	while (next < stations.size() - 1 && stations[next].distance < target)
+		++next;
+	const Station &a = stations[next - 1];
+	const Station &b = stations[next];
+	if (std::abs(a.distance - target) <= room + 1e-9 || std::abs(b.distance - target) <= room + 1e-9)
+		return;
+	const double t = Math::clamp((target - a.distance) / qMax(b.distance - a.distance, 1e-12), 0.0, 1.0);
+	Station station;
+	station.position = a.position + (b.position - a.position) * Math::Scalar(t);
+	station.distance = target;
+	station.outgoing = unitOrZero(b.position - a.position);
+	if (Math::length2(station.outgoing) == 0.0)
+		station.outgoing = a.outgoing;
+	station.incoming = station.outgoing;
+	station.ground = a.ground + (b.ground - a.ground) * t;
+	station.roll = a.roll + (b.roll - a.roll) * t;
+	station.width = a.width + (b.width - a.width) * t;
+	// The next row may be at the start of the next span: it is the end of this one.
+	station.span = a.span;
+	const double b_along = b.span == a.span ? b.along : 1.0;
+	station.along = a.along + (b_along - a.along) * t;
+	stations.insert(next, station);
+}
+
 void add_cut_stations(QVector<Station> &stations, double piece_length)
 {
 	if (piece_length <= 0.0 || stations.size() < 2)
@@ -611,30 +682,71 @@ void add_cut_stations(QVector<Station> &stations, double piece_length)
 	// the room left to piece_length is shared by the two cuts of a piece.
 	const double room = qMax(0.0, (piece_length - length / double(pieces)) * 0.5);
 	for (int p = 1; p < pieces; ++p)
+		insert_station(stations, length * double(p) / double(pieces), room);
+}
+
+// The rows the vertex colors need: where the fades at the ends of the road stop, and
+// the middle of every span for a green channel that is 0 there.
+void add_color_stations(QVector<Station> &stations, const RoadSettings &settings, bool closed)
+{
+	if (!settings.vertex_colors || stations.size() < 2)
+		return;
+	const double length = stations.last().distance;
+	// A closed road has no ends.
+	if (!closed)
 	{
-		const double target = length * double(p) / double(pieces);
-		int next = 1;
-		while (next < stations.size() - 1 && stations[next].distance < target)
-			++next;
-		const Station &a = stations[next - 1];
-		const Station &b = stations[next];
-		if (std::abs(a.distance - target) <= room + 1e-9 || std::abs(b.distance - target) <= room + 1e-9)
-			continue;
-		if (stations.size() >= MAX_STATIONS)
-			return;
-		const double t = Math::clamp((target - a.distance) / qMax(b.distance - a.distance, 1e-12), 0.0, 1.0);
-		Station station;
-		station.position = a.position + (b.position - a.position) * Math::Scalar(t);
-		station.distance = target;
-		station.outgoing = unitOrZero(b.position - a.position);
-		if (Math::length2(station.outgoing) == 0.0)
-			station.outgoing = a.outgoing;
-		station.incoming = station.outgoing;
-		station.ground = a.ground + (b.ground - a.ground) * t;
-		station.roll = a.roll + (b.roll - a.roll) * t;
-		station.width = a.width + (b.width - a.width) * t;
-		stations.insert(next, station);
+		if (settings.color_start_fade > 0.0f && double(settings.color_start_fade) < length)
+			insert_station(stations, double(settings.color_start_fade), 0.01);
+		if (settings.color_end_fade > 0.0f && double(settings.color_end_fade) < length)
+			insert_station(stations, length - double(settings.color_end_fade), 0.01);
 	}
+	if (settings.color_green == ROAD_GREEN_TO_MIDDLE)
+	{
+		// The rows at the points are the first ones of their spans.
+		QVector<QPair<double, double>> spans;
+		for (int i = 0; i + 1 < stations.size(); ++i)
+		{
+			if (i == 0 || stations[i].span != stations[i - 1].span)
+				spans.append({stations[i].distance, 0.0});
+			spans.last().second = stations[i + 1].distance;
+		}
+		for (const auto &span : spans)
+			insert_station(stations, (span.first + span.second) * 0.5, 0.01);
+	}
+}
+
+// A random number 0..1 for a whole number pair.
+double hash_noise(qint64 x, qint64 y)
+{
+	quint64 h = quint64(x) * 0x9E3779B97F4A7C15ULL;
+	h ^= quint64(y) * 0xC2B2AE3D27D4EB4FULL;
+	h ^= h >> 29;
+	h *= 0xBF58476D1CE4E5B9ULL;
+	h ^= h >> 32;
+	return double(h >> 11) * (1.0 / 9007199254740992.0);
+}
+
+// A random number 0..1 for a place on the ground: the same place always gets the same one,
+// so the noise does not change where the road is not changed. With a 'size' the numbers
+// are on a grid of cells that big and blended smoothly between them: spots of that size.
+double place_noise(const Math::Vec3 &position, double size)
+{
+	if (size <= 1e-6)
+		return hash_noise(std::llround(double(position.x) * 100.0), std::llround(double(position.y) * 100.0));
+	const double x = double(position.x) / size;
+	const double y = double(position.y) / size;
+	const double cell_x = std::floor(x);
+	const double cell_y = std::floor(y);
+	const qint64 ix = qint64(cell_x);
+	const qint64 iy = qint64(cell_y);
+	const auto smooth = [](double t) { return t * t * (3.0 - 2.0 * t); };
+	const double fx = smooth(x - cell_x);
+	const double fy = smooth(y - cell_y);
+	const double bottom = hash_noise(ix, iy) + (hash_noise(ix + 1, iy) - hash_noise(ix, iy)) * fx;
+	const double top = hash_noise(ix, iy + 1) + (hash_noise(ix + 1, iy + 1) - hash_noise(ix, iy + 1)) * fx;
+	// Blending pulls the values to the middle: stretched back to about the whole 0..1.
+	const double value = bottom + (top - bottom) * fy;
+	return Math::clamp(0.5 + (value - 0.5) * 1.6, 0.0, 1.0);
 }
 
 Math::Vec3 quadratic_bezier(const Math::Vec3 &p0, const Math::Vec3 &p1, const Math::Vec3 &p2, double t)
@@ -812,12 +924,27 @@ void RoadBuilder::setActive(bool active)
 	{
 		CurveEditor::recoverManipulators();
 		// The road is drawn with the Visualizer, once per frame.
-		saved_visualizer_mode_ = Visualizer::getMode();
-		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
-			Visualizer::setMode(Visualizer::MODE_ENABLED_DEPTH_TEST_ENABLED);
+		requestVisualizer();
 		Engine::get()->getEventEndWorldUpdate().connect(connections_, this, &RoadBuilder::update);
 		// Hidden pieces are saved shown; they are hidden again on the next frame.
-		World::getEventPreWorldSave().connect(connections_, [this](const char *) { show_hidden_pieces(); });
+		World::getEventPreWorldSave().connect(connections_, [this](const char *) {
+			show_hidden_pieces();
+			// Also the pieces of roads the tool does not know now: a copy made while they
+			// were hidden carries them hidden.
+			for (const int type : {int(Node::OBJECT_MESH_STATIC), int(Node::DECAL_MESH)})
+			{
+				Vector<NodePtr> nodes;
+				World::getNodesByType(type, nodes);
+				for (const NodePtr &node : nodes)
+				{
+					if (node->hasData(HIDDEN_DATA))
+					{
+						node->setEnabled(true);
+						node->removeData(HIDDEN_DATA);
+					}
+				}
+			}
+		});
 		// Clicks on the points of the road are taken all the time the tool is active.
 		qApp->installEventFilter(this);
 		// The ground and the asset to bend may have changed while the tool was off.
@@ -834,8 +961,7 @@ void RoadBuilder::setActive(bool active)
 		show_hidden_pieces();
 		qApp->removeEventFilter(this);
 		connections_.disconnectAll();
-		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
-			Visualizer::setMode(Visualizer::MODE_DISABLED);
+		releaseVisualizer();
 	}
 }
 
@@ -993,6 +1119,11 @@ void RoadBuilder::setSelectedPointsWidth(double scale)
 		action->set(point, POINT_WIDTH_DATA, QByteArray::number(scale, 'g', 6));
 	SetNodeDataAction::push(action);
 	notify_changed();
+}
+
+float RoadBuilder::defaultPieceLength(RoadOutput output)
+{
+	return output == ROAD_OUTPUT_BENT ? 50.0f : RoadSettings().piece_length;
 }
 
 int RoadBuilder::maxDecalTriangles()
@@ -1265,8 +1396,13 @@ void RoadBuilder::setAddingPoints(bool adding)
 	notify_changed();
 }
 
-void RoadBuilder::setSettings(const RoadSettings &settings)
+void RoadBuilder::setSettings(const RoadSettings &new_settings)
 {
+	// Made into something else with the default length of the pieces: the default of
+	// the new output.
+	RoadSettings settings = new_settings;
+	if (settings.output != settings_.output && settings.piece_length == defaultPieceLength(settings_.output))
+		settings.piece_length = defaultPieceLength(settings.output);
 	const SurfaceFilter old_ground = settings_.ground;
 	const bool decal_changed = settings.decal_depth != settings_.decal_depth
 		|| settings.decal_visible_distance != settings_.decal_visible_distance
@@ -1295,6 +1431,7 @@ void RoadBuilder::resetSettings()
 	settings.folder = settings_.folder;
 	// What the road is made into and of, too.
 	settings.output = settings_.output;
+	settings.piece_length = defaultPieceLength(settings.output);
 	settings.bend_parts = settings_.bend_parts;
 	settings.bend_forward = settings_.bend_forward;
 	settings.bend_up = settings_.bend_up;
@@ -1369,6 +1506,12 @@ void RoadBuilder::load_settings()
 	settings.inner_round = float(json.value("inner_round").toDouble(defaults.inner_round));
 	settings.roll = float(json.value("roll").toDouble(defaults.roll));
 	settings.side_offset = float(json.value("side_offset").toDouble(defaults.side_offset));
+	settings.vertex_colors = json.value("vertex_colors").toBool(defaults.vertex_colors);
+	settings.color_edge = float(json.value("color_edge").toDouble(defaults.color_edge));
+	settings.color_start_fade = float(json.value("color_start_fade").toDouble(defaults.color_start_fade));
+	settings.color_end_fade = float(json.value("color_end_fade").toDouble(defaults.color_end_fade));
+	settings.color_green = RoadGreenMode(json.value("color_green").toInt(defaults.color_green));
+	settings.color_noise_size = float(json.value("color_noise_size").toDouble(defaults.color_noise_size));
 	settings.material = json.value("material").toString();
 	settings.folder = json.value("folder").toString();
 
@@ -1432,6 +1575,12 @@ void RoadBuilder::save_settings(bool undoable, bool merge)
 	json.insert("inner_round", double(settings_.inner_round));
 	json.insert("roll", double(settings_.roll));
 	json.insert("side_offset", double(settings_.side_offset));
+	json.insert("vertex_colors", settings_.vertex_colors);
+	json.insert("color_edge", double(settings_.color_edge));
+	json.insert("color_start_fade", double(settings_.color_start_fade));
+	json.insert("color_end_fade", double(settings_.color_end_fade));
+	json.insert("color_green", int(settings_.color_green));
+	json.insert("color_noise_size", double(settings_.color_noise_size));
 	json.insert("material", settings_.material);
 	json.insert("folder", settings_.folder);
 	// Which settings change: changes of the same ones made one right after another (a
@@ -1486,6 +1635,15 @@ QByteArray RoadBuilder::snapshot() const
 	putBytes(state, double(settings_.inner_round));
 	putBytes(state, double(settings_.roll));
 	putBytes(state, double(settings_.side_offset));
+	// The vertex colors only when they are on: a road made before them is not outdated.
+	if (settings_.vertex_colors && settings_.output != ROAD_OUTPUT_BENT)
+	{
+		putBytes(state, double(settings_.color_edge));
+		putBytes(state, double(settings_.color_start_fade));
+		putBytes(state, double(settings_.color_end_fade));
+		putBytes(state, double(settings_.color_green));
+		putBytes(state, double(settings_.color_noise_size));
+	}
 	if (settings_.output == ROAD_OUTPUT_BENT)
 	{
 		putBytes(state, double(settings_.bend_merge_materials));
@@ -1579,10 +1737,13 @@ void RoadBuilder::ground_heights(const QVector<Math::Vec3> &points, QVector<doub
 		}
 	} else
 	{
-		// A ray down at every point. The road itself, its old mesh included, is looked
-		// through.
+		// A ray down at every point. The road itself, its old mesh and its preview
+		// included, is looked through: on its own preview the road would rise a little
+		// with every change, and a ray tests every triangle of that one big mesh.
 		Vector<NodePtr> ignore;
 		ignore.append(root_);
+		if (preview_ && !preview_.isDeleted())
+			ignore.append(preview_);
 		for (int i : missing)
 		{
 			const Math::Vec3 above = points[i] + Math::Vec3(0.0, 0.0, SNAP_UP);
@@ -1635,12 +1796,16 @@ void RoadBuilder::rebuild_grid(bool on_ground)
 			"У дороги получилось бы больше %1 рядов: увеличьте «Шаг» или «Угол на поворотах».").arg(MAX_STATIONS));
 		return;
 	}
+	add_color_stations(stations, settings_, points.closed);
 	add_cut_stations(stations, double(settings_.piece_length));
 	if (stations.size() < 2)
 		return;
 
+	// The fade of R at the edges needs a column of vertices that far from each edge.
+	const bool colors = settings_.vertex_colors;
+	const bool edge_columns = colors && settings_.color_edge > 0.0f;
 	RoadGrid &grid = grid_;
-	grid.columns = settings_.columns;
+	grid.columns = settings_.columns + (edge_columns ? 2 : 0);
 	grid.stations = int(stations.size());
 	grid.length = measured.distances.last();
 	const int columns = grid.columns;
@@ -1648,14 +1813,43 @@ void RoadBuilder::rebuild_grid(bool on_ground)
 	grid.vertices.resize(grid.stations * row_size);
 	grid.uvs.resize(grid.stations * row_size);
 	grid.normals.resize(grid.stations * row_size);
+	grid.colors.fill(Math::vec4(1.0f, 1.0f, 1.0f, 1.0f), grid.stations * row_size);
 
 	// Where every vertex of a row is across the road, from 0 on the left edge to 1 on
-	// the right one.
+	// the right one; the edge columns of the vertex colors go in among the strips.
 	QVector<double> across(grid.stations * row_size);
+	QVector<double> edges(grid.stations, 0.0);
+	QVector<double> row(row_size);
 	for (int i = 0; i < grid.stations; ++i)
 	{
+		for (int j = 0; j <= settings_.columns; ++j)
+			row[j] = double(j) / settings_.columns;
+		if (edge_columns)
+		{
+			const double width = double(settings_.width) * stations[i].width;
+			edges[i] = Math::clamp(double(settings_.color_edge) / qMax(width, 1e-6), 0.01, 0.5);
+			row[settings_.columns + 1] = edges[i];
+			row[settings_.columns + 2] = 1.0 - edges[i];
+			std::sort(row.begin(), row.end());
+			// An edge column on a line of the grid (Edge a whole number of strips), or the
+			// two of them in the middle of a narrow road: the columns of one place are spread
+			// over the strip after it instead of making strips of no width. The fade is
+			// read from where the vertices are, so it stays as it is.
+			const int last = row_size - 1;
+			for (int k = 1; k < last;)
+			{
+				int end = k;
+				while (end < last && row[end] - row[k - 1] < 1e-4)
+					++end;
+				const double from = row[k - 1];
+				const double to = row[end];
+				for (int m = k; m < end; ++m)
+					row[m] = from + (to - from) * double(m - k + 1) / double(end - k + 1);
+				k = end + 1;
+			}
+		}
 		for (int j = 0; j <= columns; ++j)
-			across[grid.index(i, j)] = double(j) / columns;
+			across[grid.index(i, j)] = row[j];
 	}
 
 	// The texture repeats a whole number of times around a closed road, so that it
@@ -1734,6 +1928,49 @@ void RoadBuilder::rebuild_grid(bool on_ground)
 			grid.vertices[grid.index(i, j)] = left + (right - left) * Math::Scalar(across[grid.index(i, j)]);
 	}
 
+	// The vertex colors, while the vertices are where the curve has put them (the noise
+	// keeps to the place, whatever the ground under it).
+	if (colors)
+	{
+		const int count = points.count();
+		const auto green_at_point = [count](int point) { return (point % qMax(count, 1)) % 2 == 0 ? 1.0 : 0.0; };
+		const double start_fade = points.closed ? 0.0 : double(settings_.color_start_fade);
+		const double end_fade = points.closed ? 0.0 : double(settings_.color_end_fade);
+		for (int i = 0; i < grid.stations; ++i)
+		{
+			const Station &station = stations[i];
+			double ends = 1.0;
+			if (start_fade > 0.0)
+				ends = qMin(ends, station.distance / start_fade);
+			if (end_fade > 0.0)
+				ends = qMin(ends, (grid.length - station.distance) / end_fade);
+			ends = Math::clamp(ends, 0.0, 1.0);
+
+			const double f = Math::clamp(station.along, 0.0, 1.0);
+			double green;
+			if (settings_.color_green == ROAD_GREEN_TO_MIDDLE)
+				green = 0.5 * (1.0 + std::cos(2.0 * Math::Consts::PI_D * f));
+			else
+			{
+				const double from = green_at_point(station.span);
+				const double to = green_at_point(station.span + 1);
+				green = from + (to - from) * f * f * (3.0 - 2.0 * f);
+			}
+
+			for (int j = 0; j <= columns; ++j)
+			{
+				const int index = grid.index(i, j);
+				double red = ends;
+				if (edge_columns)
+				{
+					const double a = across[index];
+					red *= Math::clamp(qMin(a, 1.0 - a) / edges[i], 0.0, 1.0);
+				}
+				const double blue = place_noise(grid.vertices[index], double(settings_.color_noise_size));
+				grid.colors[index] = Math::vec4(float(red), float(green), float(blue), 1.0f);
+			}
+		}
+	}
 
 	// The roll: every row leans about the curve, the right edge down for a positive
 	// one. On the ground it shows only where the road keeps to the curve.
@@ -1758,8 +1995,9 @@ void RoadBuilder::rebuild_grid(bool on_ground)
 	// Near a point marked "off the ground" the road keeps to the height of the curve,
 	// and goes over to the ground smoothly between such a point and an ordinary one.
 	const bool decal = settings_.output == ROAD_OUTPUT_DECAL;
-	const double ground_lift = decal ? double(settings_.decal_lift) : double(settings_.ground_offset);
-	const double curve_lift = decal ? double(settings_.decal_lift) : 0.0;
+	// The lift is everywhere, at the height of the curve too: the points are put on the
+	// ground, and a mesh that goes through them flickers with it.
+	const double lift = decal ? double(settings_.decal_lift) : double(settings_.ground_offset);
 	const bool snap = settings_.snap_to_ground && on_ground;
 	QVector<Math::Vec3> wanted;
 	if (snap)
@@ -1781,7 +2019,7 @@ void RoadBuilder::rebuild_grid(bool on_ground)
 		for (int j = 0; j <= columns; ++j)
 		{
 			Math::Vec3 &vertex = grid.vertices[grid.index(i, j)];
-			const Math::Vec3 on_curve = vertex + Math::Vec3(0.0, 0.0, Math::Scalar(curve_lift));
+			const Math::Vec3 on_curve = vertex + Math::Vec3(0.0, 0.0, Math::Scalar(lift));
 			if (ground <= 0.0)
 			{
 				vertex = on_curve;
@@ -1790,7 +2028,7 @@ void RoadBuilder::rebuild_grid(bool on_ground)
 			// No ground under the vertex: it stays at the height of the curve.
 			const double height = heights[next_height++];
 			const Math::Vec3 on_ground(vertex.x, vertex.y,
-				Math::Scalar((no_ground(height) ? double(vertex.z) : height) + ground_lift));
+				Math::Scalar((no_ground(height) ? double(vertex.z) : height) + lift));
 			vertex = on_curve + (on_ground - on_curve) * Math::Scalar(ground);
 		}
 	}
@@ -1903,7 +2141,13 @@ bool RoadBuilder::takeMaterial(const Vector<UGUID> &guids)
 
 bool RoadBuilder::showMaterial() const
 {
-	const UGUID file = guidOf(settings_.material);
+	// None picked: the default one of the kind, if it is a file of the project.
+	UGUID file = guidOf(settings_.material);
+	if (!file.isValid())
+	{
+		if (const MaterialPtr material = default_road_material(settings_.output == ROAD_OUTPUT_DECAL))
+			file = material->getFileGUID();
+	}
 	if (!hasRoad() || !file.isValid())
 		return false;
 	const String path = FileSystem::getVirtualPath(file);
@@ -1951,7 +2195,7 @@ void RoadBuilder::clearMaterial()
 	::UnigineEditor::Undo::begin();
 	settings_.material.clear();
 	save_settings(true, false);
-	apply_material(Materials::findManualMaterial(settings_.output == ROAD_OUTPUT_DECAL ? "Unigine::decal_base" : "Unigine::mesh_base"));
+	apply_material(default_road_material(settings_.output == ROAD_OUTPUT_DECAL));
 	::UnigineEditor::Undo::commit();
 	notify_changed();
 }
@@ -1961,12 +2205,17 @@ void RoadBuilder::apply_decal_settings()
 	const NodePtr holder = mesh_node();
 	if (!holder)
 		return;
+	// Pieces of a bent mesh while the road is made into something else: their distances
+	// are those of the LODs of their assets, the grid ones would break them.
+	const bool foreign_bent = settings_.output != ROAD_OUTPUT_BENT
+		&& dataString(root_, KIND_DATA).startsWith(QLatin1String("bent"));
 	for (int i = 0, num = holder->getNumChildren(); i < num; ++i)
 	{
 		const NodePtr piece = holder->getChild(i);
 		if (piece->getType() == Node::OBJECT_MESH_STATIC)
 		{
-			apply_distances(checked_ptr_cast<Object>(piece));
+			if (!foreign_bent)
+				apply_distances(checked_ptr_cast<Object>(piece));
 			continue;
 		}
 		if (piece->getType() != Node::DECAL_MESH)
@@ -1978,6 +2227,14 @@ void RoadBuilder::apply_decal_settings()
 	}
 	if (preview_ && !preview_.isDeleted())
 		apply_distances(preview_);
+	for (const DecalMeshPtr &preview : decal_previews_)
+	{
+		if (!preview || preview.isDeleted())
+			continue;
+		preview->setRadius(settings_.decal_depth);
+		preview->setMaxVisibleDistance(settings_.decal_visible_distance > 0.0f ? settings_.decal_visible_distance : Math::Consts::INF);
+		preview->setMaxFadeDistance(settings_.decal_fade_distance);
+	}
 }
 
 void RoadBuilder::apply_distances(const ObjectPtr &object) const
@@ -2011,8 +2268,14 @@ void RoadBuilder::apply_distances(const ObjectPtr &object) const
 // The pieces of the road get the material at once: no Generate is needed for it.
 void RoadBuilder::apply_material(const MaterialPtr &material)
 {
+	// The preview shows the new material.
+	preview_dirty_ = true;
 	const NodePtr holder = mesh_node();
 	if (!holder || !material)
+		return;
+	// Not on the pieces of a bent mesh the road was made into before: they keep the
+	// materials of their assets.
+	if (dataString(root_, KIND_DATA).startsWith(QLatin1String("bent")))
 		return;
 	SetMaterialsAction *action = new SetMaterialsAction;
 	for (int i = 0, num = holder->getNumChildren(); i < num; ++i)
@@ -2029,27 +2292,24 @@ void RoadBuilder::apply_material(const MaterialPtr &material)
 
 QString RoadBuilder::getMaterialName() const
 {
-	// What the pieces have: the material may have been given to them by hand.
-	if (const NodePtr holder = mesh_node())
-	{
-		for (int i = 0, num = holder->getNumChildren(); i < num; ++i)
-		{
-			const NodePtr piece = holder->getChild(i);
-			if (!is_piece(piece))
-				continue;
-			const MaterialPtr material = material_of(piece);
-			if (!material)
-				break;
-			const QString path = QString::fromUtf8(material->getFilePath().get());
-			return path.isEmpty() ? QString::fromUtf8(material->getManualName()) : QFileInfo(path).completeBaseName();
-		}
-	}
+	const UGUID picked = guidOf(settings_.material);
+	if (picked.isValid() && FileSystem::getVirtualPath(picked).empty())
+		return uiText("(missing material)", "(материал не найден)");
 
-	const UGUID guid = guidOf(settings_.material);
-	if (!guid.isValid())
+	// What the pieces of the kind have (it may have been set on them by hand), else the
+	// one picked; empty while that is the default one and none is picked.
+	const bool decal = settings_.output == ROAD_OUTPUT_DECAL;
+	const MaterialPtr material = piece_material(decal ? Node::DECAL_MESH : Node::OBJECT_MESH_STATIC);
+	const MaterialPtr fallback = default_road_material(decal);
+	if (!material || (!picked.isValid() && fallback && material->getGUID() == fallback->getGUID()))
 		return QString();
-	const QString path = QString::fromUtf8(FileSystem::getVirtualPath(guid).get());
-	return path.isEmpty() ? uiText("(missing material)", "(материал не найден)") : QFileInfo(path).completeBaseName();
+	return material_name(material);
+}
+
+QString RoadBuilder::getDefaultMaterialName() const
+{
+	const MaterialPtr material = default_road_material(settings_.output == ROAD_OUTPUT_DECAL);
+	return material ? material_name(material) : QString();
 }
 
 QString RoadBuilder::defaultFolder()
@@ -2109,9 +2369,11 @@ bool RoadBuilder::setFolderFromDisk(const QString &absolute_path)
 ////////////////////////////////////////////////////////////////////////////////
 MeshPtr RoadBuilder::make_road_mesh(int piece, Math::Vec3 &pivot) const
 {
-	const int first = grid_.piece_starts[piece];
-	const int last = grid_.pieceEnd(piece);
+	return make_grid_mesh(grid_.piece_starts[piece], grid_.pieceEnd(piece), pivot, true);
+}
 
+MeshPtr RoadBuilder::make_grid_mesh(int first, int last, Math::Vec3 &pivot, bool collision) const
+{
 	// The piece is put where the middle of its bounds is.
 	Math::Vec3 minimum = grid_.vertices[grid_.index(first, 0)];
 	Math::Vec3 maximum = minimum;
@@ -2139,7 +2401,7 @@ MeshPtr RoadBuilder::make_road_mesh(int piece, Math::Vec3 &pivot) const
 			// (0, 0) and a black color of zero alpha, and a material that reads them
 			// (decal materials do) goes wrong on the road.
 			mesh->addTexCoord1(grid_.uvs[index], surface);
-			mesh->addColor(Math::vec4(1.0f, 1.0f, 1.0f, 1.0f), surface);
+			mesh->addColor(grid_.colors[index], surface);
 			mesh->addNormal(grid_.normals[index], surface);
 		}
 	}
@@ -2162,8 +2424,35 @@ MeshPtr RoadBuilder::make_road_mesh(int piece, Math::Vec3 &pivot) const
 	}
 	mesh->createTangents(surface);
 	mesh->createBounds(surface);
-	mesh->createCollisionData(surface);
+	if (collision)
+		mesh->createCollisionData(surface);
 	return mesh;
+}
+
+MaterialPtr RoadBuilder::piece_material(Node::TYPE type) const
+{
+	const bool decal = type == Node::DECAL_MESH;
+	// The pieces of a grid road, of that kind (a bent piece is a mesh too).
+	const QString kind = dataString(root_, KIND_DATA);
+	if (kind.isEmpty() || kind == QLatin1String(decal ? "decal" : "mesh"))
+	{
+		if (const NodePtr holder = mesh_node())
+		{
+			for (int i = 0, num = holder->getNumChildren(); i < num; ++i)
+			{
+				const NodePtr piece = holder->getChild(i);
+				if (piece->getType() != type)
+					continue;
+				if (const MaterialPtr material = material_of(piece))
+					return material;
+				break;
+			}
+		}
+	}
+	const MaterialPtr material = Materials::findMaterialByFileGUID(guidOf(settings_.material));
+	if (material_suits(material, type))
+		return material;
+	return default_road_material(decal);
 }
 
 bool RoadBuilder::generate()
@@ -2234,16 +2523,21 @@ bool RoadBuilder::generate()
 	const QString old_kind = dataString(root_, KIND_DATA);
 	const bool same_kind = old_kind == kind || (old_kind.isEmpty() && !bent);
 	// The material of a piece made from scratch: the one of the road if it suits the
-	// kind of the pieces, else the base one.
+	// kind of the pieces, else the default one of the kind.
 	MaterialPtr material = Materials::findMaterialByFileGUID(guidOf(settings_.material));
 	if (!material_suits(material, piece_type))
-		material = Materials::findManualMaterial(decal ? "Unigine::decal_base" : "Unigine::mesh_base");
+		material = default_road_material(decal);
 
 	// The pieces the road has are kept, in order: they only get the new geometry (their
 	// files are written anew) and their new places, so whatever was set on them by hand
 	// - the material first of all - stays. A piece added to a longer road is a copy of
 	// the first one, with all of that too. Pieces of the other kind (Mesh <-> Decal)
 	// are replaced.
+	// Decals are made anew every time, with the material of the one they replace: the
+	// engine keeps the projection of a mesh decal per node from its first mesh on, and
+	// a copy of a decal shares it with the original - given another mesh, it makes that
+	// projection anew for both, and the original is drawn with the triangles of the copy
+	// (gaps along the edges, stretched triangles).
 	const NodePtr holder = mesh_node();
 	QVector<NodePtr> old_pieces;
 	NodePtr pattern;
@@ -2306,6 +2600,39 @@ bool RoadBuilder::generate()
 		const String mesh_path = guid.isValid() ? FileSystem::guidToPath(guid) : String(file.toUtf8().constData());
 
 		const QString name = QFileInfo(file).completeBaseName();
+		// A decal piece that has had this file is kept, with all that was set on it by
+		// hand. Any other decal piece is made anew, never cloned and never given another
+		// file: the engine keeps the projection of a mesh decal per node from its first mesh
+		// on, a copy shares it with the original, and given another mesh it makes that
+		// projection anew for both - the original is drawn with the triangles of the copy
+		// (gaps along the edges, stretched triangles). A copy of a road made by the editor
+		// gets files of its own: its decals are made anew then too.
+		const bool keep_decal = decal && piece < old_pieces.size()
+			&& FileSystem::getGUID(mesh_path_of(old_pieces[piece]).get()) == guid;
+		if (decal && !keep_decal)
+		{
+			DecalMeshPtr decal_mesh = DecalMesh::create(mesh_path.get());
+			decal_mesh->setRadius(settings_.decal_depth);
+			// What the piece it replaces had: its material and masks.
+			const NodePtr old = piece < old_pieces.size() ? old_pieces[piece] : pattern;
+			const MaterialPtr old_material = old ? material_of(old) : MaterialPtr();
+			if (old_material || material)
+				decal_mesh->setMaterial(old_material ? old_material : material);
+			if (old)
+			{
+				const DecalMeshPtr old_decal = checked_ptr_cast<DecalMesh>(old);
+				decal_mesh->setViewportMask(old_decal->getViewportMask());
+				decal_mesh->setIntersectionMask(old_decal->getIntersectionMask());
+				decal_mesh->setEnabled(old_decal->isEnabled() || old_decal->hasData(HIDDEN_DATA));
+			}
+			decal_mesh->setName(name.toUtf8().constData());
+			decal_mesh->setWorldParent(holder);
+			decal_mesh->setWorldTransform(Math::translate(pivot));
+			decal_mesh->setShowInEditorEnabledRecursive(true);
+			decal_mesh->setSaveToWorldEnabledRecursive(true);
+			created.append(decal_mesh);
+			continue;
+		}
 		if (piece < old_pieces.size())
 		{
 			// A piece that is there: its file has just been written anew and the
@@ -2324,7 +2651,12 @@ bool RoadBuilder::generate()
 				ObjectMeshStaticPtr object = checked_ptr_cast<ObjectMeshStatic>(node);
 				for (int s = 0; s < object->getNumSurfaces(); ++s)
 				{
-					if (const PieceState::Surface *settings = before.surface(object->getSurfaceName(s)))
+					// The surface of a grid piece is named after the road: renamed (or a
+					// copy of the road), the one surface is matched by its place.
+					const PieceState::Surface *settings = before.surface(object->getSurfaceName(s));
+					if (!settings && before.surfaces.size() == 1 && object->getNumSurfaces() == 1)
+						settings = &before.surfaces[0];
+					if (settings)
 						PieceState::putSurface(node, s, *settings);
 				}
 			}
@@ -2338,10 +2670,16 @@ bool RoadBuilder::generate()
 		NodePtr node;
 		if (pattern)
 		{
+			// The surfaces the first piece has now (its settings were put back above): a
+			// new mesh with a surface of another name would get the default material.
+			const PieceState first = bent ? PieceState() : PieceState::of(pattern);
 			node = pattern->clone();
 			set_mesh_path(node, mesh_path);
 			if (decal)
 				checked_ptr_cast<DecalMesh>(node)->setRadius(settings_.decal_depth);
+			else if (!bent && first.surfaces.size() == 1 && node->getType() == Node::OBJECT_MESH_STATIC
+				&& checked_ptr_cast<ObjectMeshStatic>(node)->getNumSurfaces() == 1)
+				PieceState::putSurface(node, 0, first.surfaces[0]);
 		} else if (decal)
 		{
 			DecalMeshPtr decal_mesh = DecalMesh::create(mesh_path.get());
@@ -2578,6 +2916,56 @@ void RoadBuilder::draw() const
 				Visualizer::renderLine3D(corners[k], corners[(k + 1) % 4], joint_color, 0.0f, false);
 		}
 	}
+	// The grid filled with the vertex colors: every cell in small quads, the color of
+	// each blended from the corners of the cell, as the GPU blends it over the mesh.
+	const bool color_view = view_ >= ROAD_VIEW_COLOR_R && view_ <= ROAD_VIEW_COLOR_RGB;
+	if (color_view && !grid.isEmpty() && grid.colors.size() == grid.vertices.size())
+	{
+		const auto shown = [this](const Math::vec4 &c) {
+			switch (view_)
+			{
+				case ROAD_VIEW_COLOR_R: return Math::vec4(c.x, c.x, c.x, 0.9f);
+				case ROAD_VIEW_COLOR_G: return Math::vec4(c.y, c.y, c.y, 0.9f);
+				case ROAD_VIEW_COLOR_B: return Math::vec4(c.z, c.z, c.z, 0.9f);
+				default: return Math::vec4(c.x, c.y, c.z, 0.9f);
+			}
+		};
+		// As many quads as a frame can draw quickly, however long the road: a short road
+		// gets every cell cut finer, a very long one several rows in one quad.
+		const int cells = (grid.stations - 1) * grid.columns;
+		const int split = qBound(1, int(std::sqrt(double(MAX_COLOR_VIEW_QUADS) / double(qMax(cells, 1)))), 6);
+		const int rows_per_quad = qMax(1, (cells + MAX_COLOR_VIEW_QUADS - 1) / MAX_COLOR_VIEW_QUADS);
+		const double step = 1.0 / double(split);
+		for (int i = 0; i + 1 < grid.stations; i += rows_per_quad)
+		{
+			const int next = qMin(i + rows_per_quad, grid.stations - 1);
+			for (int j = 0; j < grid.columns; ++j)
+			{
+				const int corners[4] = {grid.index(i, j), grid.index(i, j + 1), grid.index(next, j + 1), grid.index(next, j)};
+				const auto position = [&](double u, double v) {
+					const Math::Vec3 this_row = grid.vertices[corners[0]] + (grid.vertices[corners[1]] - grid.vertices[corners[0]]) * Math::Scalar(u);
+					const Math::Vec3 next_row = grid.vertices[corners[3]] + (grid.vertices[corners[2]] - grid.vertices[corners[3]]) * Math::Scalar(u);
+					return this_row + (next_row - this_row) * Math::Scalar(v);
+				};
+				const auto color = [&](double u, double v) {
+					const Math::vec4 this_row = Math::lerp(grid.colors[corners[0]], grid.colors[corners[1]], float(u));
+					const Math::vec4 next_row = Math::lerp(grid.colors[corners[3]], grid.colors[corners[2]], float(u));
+					return shown(Math::lerp(this_row, next_row, float(v)));
+				};
+				for (int a = 0; a < split; ++a)
+				{
+					for (int b = 0; b < split; ++b)
+					{
+						const double u = step * a;
+						const double v = step * b;
+						Visualizer::renderQuad3D(position(u, v), position(u + step, v), position(u + step, v + step),
+							position(u, v + step), color(u + 0.5 * step, v + 0.5 * step), 0.0f, false);
+					}
+				}
+			}
+		}
+	}
+
 	if (view_ != ROAD_VIEW_CURVE && !grid.isEmpty())
 	{
 		const Math::vec4 edge_color(1.0f, 0.55f, 0.1f, 1.0f);
@@ -2587,6 +2975,9 @@ void RoadBuilder::draw() const
 		for (int j = 0; j <= grid.columns; ++j)
 		{
 			const bool edge = j == 0 || j == grid.columns;
+			// Over the colors only the outline and the joints: the lines would hide them.
+			if (color_view && !edge)
+				continue;
 			for (int i = 0; i + 1 < grid.stations; ++i)
 			{
 				Visualizer::renderLine3D(grid.vertices[grid.index(i, j)], grid.vertices[grid.index(i + 1, j)],
@@ -2600,6 +2991,8 @@ void RoadBuilder::draw() const
 				color = edge_color;
 			else if (grid.piece_starts.contains(i))
 				color = joint_color;
+			else if (color_view)
+				continue;
 			for (int j = 0; j < grid.columns; ++j)
 				Visualizer::renderLine3D(grid.vertices[grid.index(i, j)], grid.vertices[grid.index(i, j + 1)], color, 0.0f, false);
 		}
@@ -2770,10 +3163,12 @@ double RoadBuilder::getBendPartLength(int part) const
 
 QString RoadBuilder::getBendError() const
 {
+	// Only of the assets the road still has: a replaced or removed one is not an error.
 	QStringList errors;
-	for (const QString &error : bend_errors_)
+	for (const RoadBendPart &part : settings_.bend_parts)
 	{
-		if (!error.isEmpty())
+		const QString error = bend_errors_.value(part.source);
+		if (!error.isEmpty() && !errors.contains(error))
 			errors.append(error);
 	}
 	return errors.join(QLatin1Char('\n'));
@@ -3201,18 +3596,109 @@ MeshPtr RoadBuilder::bend_mesh(int first_copy, int end_copy, Math::Vec3 &pivot) 
 
 void RoadBuilder::update_preview()
 {
-	// Shown while the road is a bent mesh that is not generated as it is now: the
-	// pieces that are there show it once they are up to date.
-	bool show = active_ && hasRoad() && settings_.output == ROAD_OUTPUT_BENT && !bend_.isEmpty();
+	// Shown while the road is not generated as it is now: the pieces that are there show
+	// it once they are up to date.
+	const bool bent = settings_.output == ROAD_OUTPUT_BENT;
+	const bool decal = settings_.output == ROAD_OUTPUT_DECAL;
+	bool show = active_ && hasRoad() && (bent ? !bend_.isEmpty() : !grid_.isEmpty());
 	if (show && getNumPieces() > 0)
 		show = !is_up_to_date();
 	if (!show)
 	{
-		if (preview_ && !preview_.isDeleted() && preview_->isEnabled())
-			preview_->setEnabled(false);
+		hide_preview();
 		return;
 	}
 
+	// Decals: one per piece, the pieces are cut to few triangles for them. The mesh is
+	// given to them from memory, no file is written.
+	if (decal)
+	{
+		if (preview_ && !preview_.isDeleted())
+			preview_.deleteLater();
+		preview_ = ObjectMeshDynamicPtr();
+		const int pieces = int(grid_.piece_starts.size());
+		if (decal_previews_.size() != pieces)
+			preview_dirty_ = true;
+		while (decal_previews_.size() > pieces)
+		{
+			const DecalMeshPtr extra = decal_previews_.takeLast();
+			if (extra && !extra.isDeleted())
+				extra.deleteLater();
+		}
+		decal_preview_hashes_.resize(decal_previews_.size());
+		if (preview_dirty_)
+		{
+			preview_dirty_ = false;
+			const MaterialPtr material = piece_material(Node::DECAL_MESH);
+			for (int piece = 0; piece < pieces; ++piece)
+			{
+				if (piece == decal_previews_.size() || !decal_previews_[piece] || decal_previews_[piece].isDeleted())
+				{
+					// A new decal: no mesh yet.
+					if (piece < decal_preview_hashes_.size())
+						decal_preview_hashes_[piece].clear();
+					DecalMeshPtr created = DecalMesh::create();
+					created->setName("artist_tool_road_preview");
+					created->setShowInEditorEnabled(false);
+					created->setSaveToWorldEnabled(false);
+					created->setMeshProceduralMode(ObjectMeshStatic::PROCEDURAL_MODE_DYNAMIC);
+					if (piece == decal_previews_.size())
+						decal_previews_.append(created);
+					else
+						decal_previews_[piece] = created;
+				}
+				const DecalMeshPtr &preview = decal_previews_[piece];
+				// Only a piece whose grid changed gets its mesh anew (projected again): while
+				// a point is dragged, that is the piece or two around it, not the whole road.
+				const int first = grid_.piece_starts[piece];
+				const int last = grid_.pieceEnd(piece);
+				QCryptographicHash hash(QCryptographicHash::Md5);
+				for (int i = first; i <= last; ++i)
+				{
+					for (int j = 0; j <= grid_.columns; ++j)
+					{
+						const int index = grid_.index(i, j);
+						hash.addData(QByteArrayView(reinterpret_cast<const char *>(&grid_.vertices[index]), sizeof(Math::Vec3)));
+						hash.addData(QByteArrayView(reinterpret_cast<const char *>(&grid_.uvs[index]), sizeof(Math::vec2)));
+						hash.addData(QByteArrayView(reinterpret_cast<const char *>(&grid_.colors[index]), sizeof(Math::vec4)));
+					}
+				}
+				const QByteArray piece_hash = hash.result();
+				if (decal_preview_hashes_.size() <= piece)
+					decal_preview_hashes_.resize(piece + 1);
+				if (decal_preview_hashes_[piece] != piece_hash)
+				{
+					decal_preview_hashes_[piece] = piece_hash;
+					Math::Vec3 pivot;
+					preview->applyMoveMeshProceduralForce(make_grid_mesh(first, last, pivot, false));
+					preview->setWorldTransform(Math::translate(pivot));
+				}
+				preview->setRadius(settings_.decal_depth);
+				preview->setMaxVisibleDistance(settings_.decal_visible_distance > 0.0f ? settings_.decal_visible_distance : Math::Consts::INF);
+				preview->setMaxFadeDistance(settings_.decal_fade_distance);
+				if (material)
+					preview->setMaterial(material);
+			}
+		}
+		for (const DecalMeshPtr &preview : decal_previews_)
+		{
+			if (!preview->isEnabled())
+				preview->setEnabled(true);
+		}
+		return;
+	}
+
+	// A bent or a grid mesh: one mesh for the whole road.
+	if (!decal_previews_.isEmpty())
+	{
+		for (const DecalMeshPtr &preview : decal_previews_)
+		{
+			if (preview && !preview.isDeleted())
+				preview.deleteLater();
+		}
+		decal_previews_.clear();
+		decal_preview_hashes_.clear();
+	}
 	if (!preview_ || preview_.isDeleted())
 	{
 		preview_ = ObjectMeshDynamic::create();
@@ -3226,18 +3712,28 @@ void RoadBuilder::update_preview()
 	if (preview_dirty_)
 	{
 		preview_dirty_ = false;
-		const Math::Vec3 pivot = bend_.samples.first();
-		MeshPtr mesh = Mesh::create();
-		add_bend_copies(0, int(bend_.copies.size()), pivot, mesh);
-		for (int surface = 0; surface < mesh->getNumSurfaces(); ++surface)
+		Math::Vec3 pivot;
+		MeshPtr mesh;
+		if (bent)
 		{
-			mesh->createTangents(surface);
-			mesh->createBounds(surface);
-		}
+			pivot = bend_.samples.first();
+			mesh = Mesh::create();
+			add_bend_copies(0, int(bend_.copies.size()), pivot, mesh);
+			for (int surface = 0; surface < mesh->getNumSurfaces(); ++surface)
+			{
+				mesh->createTangents(surface);
+				mesh->createBounds(surface);
+			}
+		} else
+			mesh = make_grid_mesh(0, grid_.stations - 1, pivot, false);
 		preview_->setMesh(mesh);
 		preview_->setWorldTransform(Math::translate(pivot));
-		// The materials of the assets; the preview is not picked by the clicks.
-		apply_bend_materials(preview_);
+		// The materials of the assets, or the one of the road; the preview is not picked
+		// by the clicks.
+		if (bent)
+			apply_bend_materials(preview_);
+		else if (const MaterialPtr material = piece_material(Node::OBJECT_MESH_STATIC))
+			preview_->setMaterial(material, "*");
 		apply_distances(preview_);
 		for (int surface = 0; surface < preview_->getNumSurfaces(); ++surface)
 		{
@@ -3264,9 +3760,12 @@ void RoadBuilder::setHideOutdated(bool hide)
 
 void RoadBuilder::update_hidden_pieces()
 {
-	// Only a bent mesh: its preview and the old pieces would overlap.
+	// The preview and the old pieces would overlap. Pieces of a bent mesh while the road
+	// is made into a grid mesh or decals are not what the road is now, they only confuse:
+	// they are hidden whatever "Hide Outdated Mesh" is.
 	const NodePtr holder = mesh_node();
-	if (!hide_outdated_ || settings_.output != ROAD_OUTPUT_BENT || !holder || holder->getNumChildren() == 0 || is_up_to_date())
+	const bool bent_pieces = settings_.output != ROAD_OUTPUT_BENT && dataString(root_, KIND_DATA).startsWith(QLatin1String("bent"));
+	if (!holder || holder->getNumChildren() == 0 || (!bent_pieces && (!hide_outdated_ || is_up_to_date())))
 	{
 		show_hidden_pieces();
 		return;
@@ -3305,11 +3804,29 @@ void RoadBuilder::show_hidden_pieces()
 	}
 }
 
+void RoadBuilder::hide_preview()
+{
+	if (preview_ && !preview_.isDeleted() && preview_->isEnabled())
+		preview_->setEnabled(false);
+	for (const DecalMeshPtr &preview : decal_previews_)
+	{
+		if (preview && !preview.isDeleted() && preview->isEnabled())
+			preview->setEnabled(false);
+	}
+}
+
 void RoadBuilder::remove_preview()
 {
 	if (preview_ && !preview_.isDeleted())
 		preview_.deleteLater();
 	preview_ = ObjectMeshDynamicPtr();
+	for (const DecalMeshPtr &preview : decal_previews_)
+	{
+		if (preview && !preview.isDeleted())
+			preview.deleteLater();
+	}
+	decal_previews_.clear();
+	decal_preview_hashes_.clear();
 	editor_.setLookThrough(NodePtr());
 	preview_dirty_ = true;
 }

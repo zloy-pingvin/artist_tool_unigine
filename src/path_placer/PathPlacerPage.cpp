@@ -564,6 +564,9 @@ QWidget *PathPlacerPage::build_path_group()
 		placer_->setAddingPoints(true);
 	});
 	connect(add_points_button_, &QPushButton::toggled, this, [this](bool checked) {
+		// Set by refresh(): not a click, the message of what just happened stays.
+		if (updating_)
+			return;
 		message_.clear();
 		placer_->setAddingPoints(checked);
 	});
@@ -642,7 +645,8 @@ QWidget *PathPlacerPage::build_ground_block()
 	++row;
 	connect(refresh_ground_, &QPushButton::clicked, this, [this]() {
 		message_.clear();
-		placer_->rearrange();
+		// A step of the undo history: it moves objects that may have been set by hand.
+		placer_->rearrange(true);
 		refresh();
 	});
 

@@ -15,8 +15,8 @@ namespace BakeCore
 struct Settings
 {
 	int resolution = 2048;        // output textures are resolution x resolution
-	float frontalDistance = 0.05f; // meters; how far ABOVE the low-poly surface to search (cage offset)
-	float rearDistance = 0.05f;    // meters; how far BELOW the low-poly surface to search
+	float frontalDistance = 0.2f; // meters; how far ABOVE the low-poly surface to search (cage offset)
+	float rearDistance = 0.2f;    // meters; how far BELOW the low-poly surface to search
 	// Per-part cage overrides, keyed by LOW-POLY node id, {frontal, rear} in
 	// meters. The cage offsets the ray ORIGIN from the low-poly surface, so it
 	// belongs to the low-poly part, not to the high-poly one. Parts without an
@@ -76,6 +76,12 @@ struct Result
 	Unigine::String shadingPath;
 	Unigine::String normalPath;
 	Unigine::String emissionPath;
+	// The emission map holds colors up to 1: a brighter emission is written divided by
+	// this, which the material gets as its emission_scale.
+	float emissionScale = 1.0f;
+	// Only some maps were baked and a map that stays tiles (uv_transform of the material
+	// is not 1 1 0 0): it is kept, so the new maps are tiled too - bake all the maps.
+	bool uvTransformKept = false;
 
 	// material that received the baked textures (created or reused)
 	Unigine::String materialPath;
@@ -116,6 +122,22 @@ void assignMaterial(const std::vector<BakeGroup> &groups, Result &result);
 // out of the result, so the caller keeps its current value for them.
 std::map<int, Unigine::Math::vec2> suggestPartCage(const std::vector<BakeGroup> &groups,
 	float maxProbe, const ProgressFn &progress);
+
+// The cage as the bake sees it, without its distance: the corners of the bakeable
+// triangles of the low-poly parts, and where each goes - along the smoothed cage normal
+// (merged by position over all the parts, as the bake merges them), 'shell' times the
+// frontal distance of its part. A corner of the cage is origin + point + normal * shell *
+// frontal. 'edges' - pairs of corner indices, each edge of the cage once.
+struct CageShell
+{
+	Unigine::Math::Vec3 origin;
+	std::vector<Unigine::Math::vec3> points; // three per triangle, relative to origin
+	std::vector<Unigine::Math::vec3> normals;
+	std::vector<float> shell;
+	std::vector<int> part;                   // the low-poly node id, one per triangle
+	std::vector<int> edges;
+};
+CageShell buildCageShell(const std::vector<Unigine::Ptr<Unigine::ObjectMeshStatic>> &lows);
 
 // Collects the node itself (if it is a Static Mesh) and all Static Mesh
 // descendants. Hidden (disabled) nodes are included: hiding is a viewport

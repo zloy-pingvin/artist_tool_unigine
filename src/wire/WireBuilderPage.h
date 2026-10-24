@@ -169,6 +169,9 @@ private:
 	QVector<QWidget *> pole_asset_widgets_;
 	// The name of the attach points: not for a garland, it has no poles.
 	QVector<QWidget *> attach_widgets_;
+	// What of Poles is only for a line drawn as a curve: a line of the poles of the world
+	// keeps only the attach points there.
+	QVector<QWidget *> curve_pole_widgets_;
 	bool refresh_pending_{false};
 
 	QDoubleSpinBox *piece_size_{nullptr};
@@ -188,6 +191,10 @@ private:
 	QPushButton *generate_button_{nullptr};
 	QLabel *status_label_{nullptr};
 	QToolButton *hotkeys_header_{nullptr};
+	// "Advanced Settings" of Sag, folded by default.
+	QToolButton *sag_advanced_header_{nullptr};
+	// "Advanced Settings" of Shape (the rotation and the twist), folded by default.
+	QToolButton *shape_advanced_header_{nullptr};
 };
 
 } // namespace ArtistTool

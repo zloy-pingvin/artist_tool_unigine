@@ -4,7 +4,9 @@
 #include <UnigineGUID.h>
 #include <UnigineNode.h>
 
+#include <QElapsedTimer>
 #include <QObject>
+#include <QPoint>
 
 class QMenu;
 
@@ -39,6 +41,13 @@ protected:
 
 private:
 	void add_menu_item(QMenu *menu);
+
+	// Where the last right click was: the item goes only into the menu a right click in a
+	// viewport opens, not into the other context menus of the editor (the surfaces of the
+	// Parameters window, the World Hierarchy...).
+	quint64 last_right_press_{0};
+	QPoint right_press_position_;
+	QElapsedTimer right_press_time_;
 
 	Unigine::EventConnections connections_;
 };

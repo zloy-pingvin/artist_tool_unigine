@@ -1,4 +1,5 @@
 #include "ClutterUnpacker.h"
+#include "ViewportPicking.h"
 #include "Localization.h"
 #include "UndoActions.h"
 
@@ -30,10 +31,9 @@ namespace ArtistTool
 namespace
 {
 
-// Frames to wait in each bake phase. Spawning is a fixed heuristic: with the spawn
-// rate raised to the cell count the engine fills the area in a few frames, the rest
-// is a safety margin.
-constexpr int SPAWN_FRAMES = 30;
+// Frames to wait in each bake phase. Spawning takes as many frames as the cells need at
+// the rate that keeps a frame within a budget (see start of the bake), up to this many.
+constexpr long long MAX_SPAWN_FRAMES = 3000;
 constexpr int FLUSH_FRAMES = 2;
 
 QString node_name(const NodePtr &node)
@@ -100,7 +100,9 @@ ClutterUnpacker::~ClutterUnpacker()
 
 bool ClutterUnpacker::isSupported(const NodePtr &node)
 {
-	if (!node || node.isDeleted())
+	// Alive in the scene: a node removed in the editor (or by an undo) is kept for the
+	// undo history, it is not unpacked.
+	if (!isNodeAlive(node))
 		return false;
 
 	switch (node->getType())
@@ -250,10 +252,17 @@ void ClutterUnpacker::finish_all(bool canceled)
 {
 	busy_ = false;
 
-	if (options_.select_result && results_.size())
+	// The results still in the scene (one may have been undone meanwhile).
+	Vector<NodePtr> alive;
+	for (const NodePtr &result : results_)
+	{
+		if (isNodeAlive(result))
+			alive.append(result);
+	}
+	if (options_.select_result && alive.size())
 	{
 		::UnigineEditor::SelectionAction::applySelection(
-			new ::UnigineEditor::SelectorNodes(results_));
+			new ::UnigineEditor::SelectorNodes(alive));
 	}
 
 	queue_.clear();
@@ -381,8 +390,30 @@ bool ClutterUnpacker::begin_world_clutter_bake(const NodePtr &node)
 		return false;
 	}
 
+	// The engine looks the whole grid over for every cell it spawns in a frame (spawn rate
+	// x cells), so the cells are spawned at a rate that keeps a frame within a budget, over
+	// as many frames as that takes. A grid that would take too long is not unpacked: done
+	// in a fixed number of frames, it would hang the editor or leave cells unspawned (and
+	// the source would still be disabled or deleted as if all was there).
+	const float step = Math::max(clutter->getStep(), 0.001f);
+	const long long csx = Math::max(1, Math::ftoi(Math::ceil(clutter->getSizeX() / step)));
+	const long long csy = Math::max(1, Math::ftoi(Math::ceil(clutter->getSizeY() / step)));
+	const long long cells_total = csx * csy;
+	const long long per_frame_budget = 20000000;
+	const long long spawn_rate = qBound(1LL, per_frame_budget / qMax(1LL, cells_total), qMin(cells_total, 200000LL));
+	const long long spawn_frames = (cells_total + spawn_rate - 1) / spawn_rate + 10;
+	if (spawn_frames > MAX_SPAWN_FRAMES)
+	{
+		emit message(MSG_ERROR, uiText(
+			"'%1' has too many cells (%2) to unpack at once: make its Step larger, or its size smaller.",
+			"В '%1' слишком много ячеек (%2), чтобы распаковать за раз: увеличьте его Step или уменьшите размер.")
+			.arg(node_name(node)).arg(cells_total));
+		return false;
+	}
+
 	bake_ = BakeState{};
 	bake_.clutter = clutter;
+	bake_.spawn_frames = int(spawn_frames);
 	bake_.saved_force_streaming = Render::isForceStreaming();
 	bake_.saved_spawn_rate = clutter->getSpawnRate();
 	bake_.saved_visible_distance = clutter->getVisibleDistance();
@@ -399,18 +430,10 @@ bool ClutterUnpacker::begin_world_clutter_bake(const NodePtr &node)
 		Math::length(Renderer::getCameraPosition() - clutter_position));
 	const float reach = (float(cam_dist) + clutter->getSizeX() + clutter->getSizeY() + 1000.0f) / scale;
 
-	// Spawn every cell in a single pass; bound the rate to the cell count so the
-	// per-frame nearest-cell search does not degenerate on huge grids.
-	const float step = Math::max(clutter->getStep(), 0.001f);
-	const long long csx = Math::max(1, Math::ftoi(Math::ceil(clutter->getSizeX() / step)));
-	const long long csy = Math::max(1, Math::ftoi(Math::ceil(clutter->getSizeY() / step)));
-	const long long cells_total = csx * csy;
-	const int spawn_rate = int(cells_total < 200000 ? cells_total : 200000);
-
 	Render::setForceStreaming(true);
-	clutter->setSpawnRate(spawn_rate);
+	clutter->setSpawnRate(int(spawn_rate));
 	clutter->setVisibleDistance(reach); // calls invalidate() internally
-	bake_.bake_spawn_rate = spawn_rate;
+	bake_.bake_spawn_rate = int(spawn_rate);
 	bake_.bake_visible_distance = reach;
 
 	Engine::get()->getEventEndWorldUpdate().connect(bake_connections_, this,
@@ -497,14 +520,14 @@ void ClutterUnpacker::bake_tick()
 
 	++bake_.frames;
 
-	const int total_frames = SPAWN_FRAMES + FLUSH_FRAMES;
+	const int total_frames = bake_.spawn_frames + FLUSH_FRAMES;
 	const QString status = uiText("Baking '%1'...", "Генерация '%1'...").arg(node_name(bake_.clutter));
 
 	switch (bake_.phase)
 	{
 		case BakeState::PHASE_SPAWN:
 			report_progress(float(bake_.frames) / float(total_frames), status);
-			if (bake_.frames >= SPAWN_FRAMES)
+			if (bake_.frames >= bake_.spawn_frames)
 			{
 				// getNodes() can only see a clutter's RECYCLE POOL, not its active cell
 				// nodes. Snapshot the pre-existing (stale) pool first, so that only the
@@ -527,7 +550,7 @@ void ClutterUnpacker::bake_tick()
 			break;
 
 		case BakeState::PHASE_FLUSH:
-			report_progress(float(SPAWN_FRAMES + bake_.frames) / float(total_frames), status);
+			report_progress(float(bake_.spawn_frames + bake_.frames) / float(total_frames), status);
 			if (bake_.frames >= FLUSH_FRAMES)
 			{
 				// Build the result from the Qt event loop rather than from inside the
@@ -637,7 +660,8 @@ void ClutterUnpacker::finish_world_clutter_bake()
 				continue;
 			if (idx < 0)
 				idx = k;
-			else if (ambiguous_a < 0)
+			// the same asset twice (other probabilities) is not ambiguous
+			else if (ambiguous_a < 0 && ref_paths[k] != ref_paths[idx])
 			{
 				ambiguous_a = idx;
 				ambiguous_b = k;
@@ -772,9 +796,13 @@ NodePtr ClutterUnpacker::make_root(const NodePtr &source) const
 
 void ClutterUnpacker::commit_result(const NodePtr &source, const NodePtr &root)
 {
-	// A source owned by a node reference (possessor) lives in a hierarchy the
-	// editor does not let you add nodes to, so the result goes to the world root.
-	if (options_.keep_parent && !source->getPossessor())
+	// A source inside the content of a node reference (at any depth: the reference
+	// possesses only the root of its content) lives in a hierarchy that is not saved with
+	// the world: the result goes to the world root, and the source is left as it is.
+	bool in_reference = false;
+	for (NodePtr n = source; n && !in_reference; n = n->getParent())
+		in_reference = bool(n->getPossessor());
+	if (options_.keep_parent && !in_reference)
 	{
 		// Right below the source: in its parent, or in the world root list if the
 		// source has no parent.
@@ -797,13 +825,13 @@ void ClutterUnpacker::commit_result(const NodePtr &source, const NodePtr &root)
 	Undo::begin();
 	Undo::apply(new CreateNodesAction(root));
 	// Right below the source after Ctrl+Z and Ctrl+Y too.
-	if (options_.keep_parent && !source->getPossessor())
+	if (options_.keep_parent && !in_reference)
 	{
 		ArtistTool::SetNodeOrderAction *order = new ArtistTool::SetNodeOrderAction;
 		order->add(root);
 		Undo::apply(order);
 	}
-	switch (options_.source_mode)
+	switch (in_reference ? UnpackOptions::SOURCE_KEEP : options_.source_mode)
 	{
 		case UnpackOptions::SOURCE_DISABLE:
 			Undo::apply(new EnableNodeAction(source, false));

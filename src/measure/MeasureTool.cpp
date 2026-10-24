@@ -1,4 +1,5 @@
 #include "MeasureTool.h"
+#include "UiHelpers.h"
 #include "Localization.h"
 #include "Loupe.h"
 #include "VertexSnap.h"
@@ -397,15 +398,12 @@ void MeasureTool::update_drawing()
 	if (drawing_)
 	{
 		// The measurements are drawn with the Visualizer, once per frame.
-		saved_visualizer_mode_ = Visualizer::getMode();
-		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
-			Visualizer::setMode(Visualizer::MODE_ENABLED_DEPTH_TEST_ENABLED);
+		requestVisualizer();
 		Engine::get()->getEventEndWorldUpdate().connect(connections_, this, &MeasureTool::update);
 	} else
 	{
 		connections_.disconnectAll();
-		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
-			Visualizer::setMode(Visualizer::MODE_DISABLED);
+		releaseVisualizer();
 	}
 }
 
@@ -1171,7 +1169,9 @@ bool MeasureTool::eventFilter(QObject *watched, QEvent *event)
 			if (code == Qt::Key_Escape)
 				handled = lock_ != LOCK_NONE || isMeasurementInProgress() || measuring_;
 			else if (code == Qt::Key_Backspace)
-				handled = !measurements_.isEmpty();
+				// Only while measuring: off, it would open the last measurement again with
+				// nothing to finish it.
+				handled = measuring_ && !measurements_.isEmpty();
 			else
 				handled = !(key->modifiers() & (Qt::ControlModifier | Qt::AltModifier)) && lock_anchor(anchor);
 			if (!handled)

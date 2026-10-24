@@ -21,9 +21,6 @@ namespace
 {
 
 const char VIEWPORT_CLASS_MARK[] = "ViewportWindow";
-// How many ignored objects in a row a ray looks behind for a surface. A ray along a
-// fence goes through many of its sections before it gets to the ground.
-const int MAX_LOOK_BEHIND = 48;
 
 int surface_type_of(const ObjectPtr &object)
 {
@@ -257,6 +254,9 @@ SurfaceHit raycastSurface(const Math::Vec3 &p0, const Math::Vec3 &p1, const Surf
 	Vector<ObjectPtr> objects;
 	World::getIntersection(p0, p1, objects, false);
 
+	// Every object along the ray, surface by surface - the terrains too (a Landscape
+	// Terrain answers per surface by its height map). A query of the world would test the
+	// same objects the same way again, only fewer of them (the Intersection flag).
 	ObjectIntersectionNormalPtr intersection = ObjectIntersectionNormal::create();
 	for (const ObjectPtr &object : objects)
 	{
@@ -266,24 +266,30 @@ SurfaceHit raycastSurface(const Math::Vec3 &p0, const Math::Vec3 &p1, const Surf
 			continue;
 
 		const bool object_allowed = is_object_allowed(object, filter);
+		// What is looked through is not tested at all: in a dense scene (grass clusters,
+		// forests) most of the time goes there.
+		if (!object_allowed && filter.look_through)
+			continue;
 
 		// Object::getIntersection() works in the object's local space.
 		const Math::Mat4 transform = object->getWorldTransform();
 		const Math::Mat4 itransform = object->getIWorldTransform();
-		Math::Vec3 local_p0, local_p1;
+		Math::Vec3 local_p0;
 		Math::mul(local_p0, itransform, p0);
-		Math::mul(local_p1, itransform, p1);
 
 		for (int surface = 0, num = object->getNumSurfaces(); surface < num; ++surface)
 		{
 			if (!object->isEnabled(surface))
 				continue;
-			if (!object->getIntersection(local_p0, local_p1, intersection, surface))
-				continue;
-
 			const bool allowed = object_allowed && (!filter.only_intersection
 				|| (object->getIntersection(surface) && object->getIntersectionMask(surface) != 0));
 			if (!allowed && filter.look_through)
+				continue;
+			// Only what is closer than the hit found so far: a shorter ray is tested
+			// faster.
+			Math::Vec3 local_p1;
+			Math::mul(local_p1, itransform, hit.found ? hit.point : p1);
+			if (!object->getIntersection(local_p0, local_p1, intersection, surface))
 				continue;
 
 			Math::Vec3 point;
@@ -298,29 +304,6 @@ SurfaceHit raycastSurface(const Math::Vec3 &p0, const Math::Vec3 &p1, const Surf
 				? normal * (1.0f / std::sqrt(normal_length2)) : Math::vec3(0.0f, 0.0f, 1.0f);
 			take_closer(hit, hit_allowed, allowed, p0, point, normal);
 		}
-	}
-
-	// Objects that are not intersected surface by surface (e.g. terrains). This query
-	// only sees surfaces with the Intersection flag.
-	WorldIntersectionNormalPtr world_intersection = WorldIntersectionNormal::create();
-	Vector<NodePtr> exclude;
-	for (int attempt = 0; attempt < MAX_LOOK_BEHIND; ++attempt)
-	{
-		ObjectPtr object = World::getIntersection(p0, p1, ~0, exclude, world_intersection);
-		if (!object)
-			break;
-
-		// Look behind the ignored objects and the editor helpers.
-		if (isEditorInternal(object) || is_ignored(object, ignore)
-			|| (filter.look_through && !is_object_allowed(object, filter)))
-		{
-			exclude.append(object);
-			continue;
-		}
-
-		take_closer(hit, hit_allowed, is_object_allowed(object, filter), p0,
-			world_intersection->getPoint(), world_intersection->getNormal());
-		break;
 	}
 
 	hit.allowed = hit.found && hit_allowed;

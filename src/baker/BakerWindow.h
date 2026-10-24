@@ -4,6 +4,7 @@
 
 #include <UnigineEvent.h>
 
+#include <QByteArray>
 #include <QPointer>
 #include <QWidget>
 
@@ -47,6 +48,8 @@ public:
 protected:
 	// drop target for nodes dragged from the World Nodes hierarchy
 	bool eventFilter(QObject *watched, QEvent *event) override;
+	void showEvent(QShowEvent *event) override;
+	void hideEvent(QHideEvent *event) override;
 
 private slots:
 	void pickHighFromSelection();
@@ -65,6 +68,9 @@ private:
 	void clearSlot(bool high);
 	void updateSlotLabels();
 	void setSlotHidden(bool high, bool hidden);
+	// The nodes Hide turned off (they were on), by slot: Show turns on just these.
+	std::vector<int> highSwitchedOff_;
+	std::vector<int> lowSwitchedOff_;
 	std::vector<int> decodeNodeDrop(const QMimeData *mime) const;
 	void refreshMeshTree();
 	void updateSuggestedName();
@@ -145,9 +151,9 @@ private:
 	struct PartCage
 	{
 		bool hasFrontal = false;
-		float frontal = 0.05f;
+		float frontal = 0.2f;
 		bool hasRear = false;
-		float rear = 0.05f;
+		float rear = 0.2f;
 		bool any() const { return hasFrontal || hasRear; }
 	};
 	std::map<int, PartCage> partCage_;
@@ -163,6 +169,11 @@ private:
 	// writes one low-poly row's cage cells: inherited values are dimmed, explicit
 	// ones bright, so it is visible at a glance which parts were tuned by hand
 	void fillCageCells(QTreeWidgetItem *item, int nodeId);
+	// The rows of the low-poly parts in the list: the selected ones, or all if none is.
+	std::vector<QTreeWidgetItem *> cagePartItems() const;
+	// Moves the Front of those parts in 'direction' (+1 / -1) for 'seconds', at a speed
+	// by their size; a part that follows the global value gets its own, starting from it.
+	void nudgeCage(float direction, float seconds);
 	void resetAllPartCage();
 	// Visits the gathered decals by WALKING the high-poly hierarchy instead of
 	// looking them up by id: decals nested inside a Node Reference are not
@@ -195,16 +206,47 @@ private:
 	// The single place the capture-size policy lives, so the label under the
 	// window and the bake itself can never disagree. Returns the size in texels
 	// and, optionally, the numbers behind it.
+	// System RAM a capture takes per texel of a surface: 3 RGBA8 images, 4 with the emission,
+	// and a coverage byte.
+	double ramBytesPerTexel() const;
 	int computeCaptureSize(int surfaceCount, CaptureBudget *outBudget = nullptr) const;
 	void updateCaptureInfo();
 
 	bool baking_ = false;
 	bool cancelRequested_ = false;
+	// The world was closed or another one loaded while a bake or a probe was on: its
+	// nodes are gone, nothing is done with them any more (the work is cancelled).
+	bool worldChanged_ = false;
+	Unigine::EventConnections worldConns_;
 	// runBake() is running: the window stays busy after the UI is unlocked.
 	bool finishing_ = false;
 	bool uiLocked_ = false;
+	// stop() was called or the window is being destroyed: see update_cage_preview().
+	bool shuttingDown_ = false;
 	// Takes in the readbacks still on their way after a bake (see update_busy()).
 	QTimer *drainTimer_ = nullptr;
+
+	// The cage shown in the viewport (Show Cage): see update_cage_preview().
+	QPushButton *showCageButton_ = nullptr; // a toggle button
+	QTimer *cageTimer_ = nullptr;
+	// The cage, drawn with the Visualizer every frame: see-through faces and their edges.
+	// The shell is made anew only when the parts change (their meshes, places, surfaces);
+	// a change of a distance only moves its corners.
+	BakeCore::CageShell cageShell_;
+	QByteArray cageShellSignature_;
+	std::vector<Unigine::Math::Vec3> cageTriangles_; // three corners per triangle
+	std::vector<Unigine::Math::Vec3> cageEdges_;     // two ends per edge, each edge once
+	Unigine::EventConnections cageConns_;
+	bool cageDrawing_ = false;
+	// The cage asked for the Visualizer (ArtistTool::requestVisualizer()).
+	bool visualizerRequested_ = false;
+	// What the cage was made for: the parts, where they are, their distances.
+	QByteArray cageSignature_;
+	// Made anew when the parts or the distances change; hidden while the Baker is not
+	// shown or bakes (the captures of the bake would see it).
+	void update_cage_preview();
+	void remove_cage_preview();
+	void draw_cage() const;
 	int drainTicks_ = 0;
 	void update_busy();
 	void drain_transfers();
@@ -272,6 +314,10 @@ private:
 	QDoubleSpinBox *decalDistanceSpin_ = nullptr;
 	QPushButton *autoCageButton_ = nullptr;
 	QPushButton *resetCageButton_ = nullptr;
+	// Held down: the Front of the parts grows / shrinks at a speed by their size (see
+	// nudgeCage()).
+	QPushButton *shrinkCageButton_ = nullptr;
+	QPushButton *growCageButton_ = nullptr;
 	QPushButton *bakeButton_ = nullptr;
 	QPushButton *cancelButton_ = nullptr;
 	QProgressBar *progressBar_ = nullptr;

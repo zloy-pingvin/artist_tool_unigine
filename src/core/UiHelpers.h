@@ -61,11 +61,26 @@ QString choiceButtonStyle();
 // The main button of a page: blue, orange while checked (the mode it turns on is
 // working and the button stops it).
 QString primaryButtonStyle();
+// The Visualizer for a tool that draws with it: turned on (if it is off) while any tool
+// asks for it, back off when the last one lets it go - and only if it is still as it was
+// turned on (the user may have switched it meanwhile). Calls in pairs.
+void requestVisualizer();
+void releaseVisualizer();
+
 // A button that says "this is what to press now": green, gray while disabled.
 QString goButtonStyle();
 // A button that asks for attention - what it does is not done by itself now: blue,
 // gray while disabled.
 QString attentionButtonStyle();
+// A button of a manual step done in another tool of the editor (painting a mask): orange,
+// gray while disabled.
+QString handWorkButtonStyle();
+// A frame (a group box) of a page a little darker than the page, so that the frames stand
+// apart. A frame inside it is left as it is.
+void makeTintedFrame(QWidget *frame);
+// The rule for every tab of the window: its frames that are not inside another frame are
+// tinted (makeTintedFrame()). Frames made later (none so far) are not.
+void tintPageFrames(QWidget *page);
 
 // Six toggle buttons - X+ X- Y+ Y- Z+ Z-, each letter in the color of its axis, one
 // of them on. The ids of the buttons are 0..5 in that order (see AxisDirection).

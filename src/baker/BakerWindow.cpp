@@ -14,9 +14,12 @@
 
 #include <UnigineEngine.h>
 #include <UnigineLog.h>
+#include <UnigineMaterials.h>
+#include <UnigineMesh.h>
 #include <UnigineObjects.h>
 #include <UnigineRender.h>
 #include <UnigineSystemInfo.h>
+#include <UnigineVisualizer.h>
 #include <UnigineNodes.h>
 #include <UnigineWorld.h>
 
@@ -60,6 +63,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <set>
@@ -191,7 +195,15 @@ private:
 // are saved from and the bake reads, the buttons show it and set it.
 QWidget *makeChoiceRow(QComboBox *combo, const std::vector<const char *> &icons)
 {
+	// The box is a child of the outer widget, the buttons of the inner one: disabling the
+	// buttons must not disable the box too, or it could never be enabled again (a child
+	// of a disabled widget stays disabled) and the buttons with it.
+	QWidget *outer = new QWidget();
+	QHBoxLayout *outer_layout = new QHBoxLayout(outer);
+	outer_layout->setContentsMargins(0, 0, 0, 0);
+	outer_layout->setSpacing(0);
 	QWidget *row = new QWidget();
+	outer_layout->addWidget(row);
 	QHBoxLayout *layout = new QHBoxLayout(row);
 	layout->setContentsMargins(0, 0, 0, 0);
 	layout->setSpacing(3);
@@ -213,7 +225,7 @@ QWidget *makeChoiceRow(QComboBox *combo, const std::vector<const char *> &icons)
 		group->addButton(button, i);
 		layout->addWidget(button);
 	}
-	combo->setParent(row);
+	combo->setParent(outer);
 	combo->hide();
 	QObject::connect(group, &QButtonGroup::idClicked, combo, &QComboBox::setCurrentIndex);
 	const auto show = [group, combo]() {
@@ -224,7 +236,7 @@ QWidget *makeChoiceRow(QComboBox *combo, const std::vector<const char *> &icons)
 	show();
 	new ChoiceEnabled(row, combo);
 	row->setEnabled(combo->isEnabled());
-	return row;
+	return outer;
 }
 
 } // namespace
@@ -519,8 +531,15 @@ BakerWindow::BakerWindow(QWidget *parent)
 		std::vector<int> &ids = high ? highIds_ : lowIds_;
 		// a mesh leaving a hidden slot must become visible again
 		if ((high ? highHideButton_ : lowHideButton_)->isChecked())
-			if (NodePtr node = World::getNodeByID(id))
-				node->setEnabled(true);
+		{
+			std::vector<int> &switchedOff = high ? highSwitchedOff_ : lowSwitchedOff_;
+			if (std::find(switchedOff.begin(), switchedOff.end(), id) != switchedOff.end())
+			{
+				if (NodePtr node = World::getNodeByID(id))
+					node->setEnabled(true);
+				switchedOff.erase(std::remove(switchedOff.begin(), switchedOff.end(), id), switchedOff.end());
+			}
+		}
 		ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
 		if (high)
 			updateSuggestedName();
@@ -553,7 +572,6 @@ BakerWindow::BakerWindow(QWidget *parent)
 			"The global distances are the ceiling: values are only lowered. An axis that\n"
 			"needs more than the ceiling stays inherited."));
 		connect(autoCageButton_, &QPushButton::clicked, this, &BakerWindow::onAutoCage);
-		cageRow->addWidget(autoCageButton_);
 
 		resetCageButton_ = new QPushButton(tr2("Сбросить к общему", "Reset To Global"));
 		resetCageButton_->setIcon(ArtistTool::makeResetIcon());
@@ -564,7 +582,57 @@ BakerWindow::BakerWindow(QWidget *parent)
 			"Drops the per-part distances so every part follows the global settings again."));
 		resetCageButton_->setEnabled(false);
 		connect(resetCageButton_, &QPushButton::clicked, this, &BakerWindow::resetAllPartCage);
-		cageRow->addWidget(resetCageButton_);
+
+		// By hand: held down, the cage grows or shrinks smoothly, at a speed that suits the
+		// size of the parts (see nudgeCage()).
+		const int nudgeInterval = 30; // ms
+		const float nudgeSeconds = float(nudgeInterval) / 1000.0f;
+		const auto makeNudge = [&](const QString &text, const QString &tip, float direction) {
+			auto button = new QPushButton(text);
+			button->setMinimumHeight(28);
+			button->setToolTip(tip);
+			button->setAutoRepeat(true);
+			button->setAutoRepeatDelay(nudgeInterval);
+			button->setAutoRepeatInterval(nudgeInterval);
+			connect(button, &QPushButton::clicked, this, [this, direction, nudgeSeconds]() { nudgeCage(direction, nudgeSeconds); });
+			return button;
+		};
+		shrinkCageButton_ = makeNudge(tr2("− Сжать «Вперёд»", "− Shrink Front"),
+			tip2("Пока нажата, дистанция \"Вперёд\" плавно уменьшается: у деталей, выделенных в "
+				"списке, или у всех, если не выделена ни одна. Скорость по размеру деталей: домик - "
+				"около 0.05 м в секунду, метровый предмет - вчетверо медленнее.",
+				"While held, the Front distance shrinks smoothly: of the parts selected in the list, "
+				"or of all of them if none is. The speed suits their size: about 0.05 m a second for "
+				"a house, four times slower for a one-meter object."), -1.0f);
+		growCageButton_ = makeNudge(tr2("+ Расширить «Вперёд»", "+ Grow Front"),
+			tip2("Пока нажата, дистанция \"Вперёд\" плавно растёт: у деталей, выделенных в "
+				"списке, или у всех, если не выделена ни одна. Скорость по размеру деталей: домик - "
+				"около 0.05 м в секунду, метровый предмет - вчетверо медленнее.",
+				"While held, the Front distance grows smoothly: of the parts selected in the list, "
+				"or of all of them if none is. The speed suits their size: about 0.05 m a second for "
+				"a house, four times slower for a one-meter object."), 1.0f);
+
+		showCageButton_ = new QPushButton(tr2("Показать кейдж", "Show Cage"));
+		showCageButton_->setCheckable(true);
+		showCageButton_->setMinimumHeight(28);
+		// On: blue, as the choice buttons; off: as the other buttons of the row.
+		showCageButton_->setStyleSheet(QString::fromUtf8(
+			"QPushButton:checked { color: white; background-color: #2f6fd6; border-color: #2f6fd6; }"));
+		showCageButton_->setToolTip(tip2(
+			"Показывает кейдж во вьюпорте полупрозрачным: low-poly, отодвинутый наружу на дистанцию "
+			"\"Вперёд\" (свою у детали или общую) по тем же нормалям, что и при запекании. "
+			"High-poly должен быть внутри него. На время запекания прячется.",
+			"Shows the cage in the viewport, see-through: the low-poly pushed out by the Front "
+			"distance (the part's own or the global one) along the same normals the bake uses. "
+			"The high-poly should be inside it. Hidden while baking."));
+		// Show, Fit, - , +, Reset.
+		for (QPushButton *button : {showCageButton_, autoCageButton_, shrinkCageButton_, growCageButton_, resetCageButton_})
+			cageRow->addWidget(button);
+		connect(showCageButton_, &QAbstractButton::toggled, this, [this](bool) { update_cage_preview(); });
+		// Follows the parts as they are moved and the distances as they are changed.
+		cageTimer_ = new QTimer(this);
+		cageTimer_->setInterval(200);
+		connect(cageTimer_, &QTimer::timeout, this, &BakerWindow::update_cage_preview);
 
 		// the global pair, right above the buttons that act on it: it is both the
 		// default for every part and the ceiling the fitting obeys
@@ -572,7 +640,7 @@ BakerWindow::BakerWindow(QWidget *parent)
 		frontalSpin_->setDecimals(4);
 		frontalSpin_->setRange(0.0001, 100.0);
 		frontalSpin_->setSingleStep(0.01);
-		frontalSpin_->setValue(0.05);
+		frontalSpin_->setValue(0.2);
 		frontalSpin_->setSuffix(tr2(" м", " m"));
 		frontalSpin_->setToolTip(tip2(
 			"Дистанция вперёд, метры: насколько выше поверхности low-poly искать high-poly.\n"
@@ -584,7 +652,7 @@ BakerWindow::BakerWindow(QWidget *parent)
 		rearSpin_->setDecimals(4);
 		rearSpin_->setRange(0.0, 100.0);
 		rearSpin_->setSingleStep(0.01);
-		rearSpin_->setValue(0.05);
+		rearSpin_->setValue(0.2);
 		rearSpin_->setSuffix(tr2(" м", " m"));
 		rearSpin_->setToolTip(tip2(
 			"Дистанция назад, метры: насколько ниже поверхности low-poly искать.\n"
@@ -592,21 +660,28 @@ BakerWindow::BakerWindow(QWidget *parent)
 			"Rear distance, meters: how far below the low-poly surface to search.\n"
 			"Default for parts and the ceiling for Fit cage."));
 
-		// a field each, with the button that puts the default back, in two columns
+		// the two fields, and one button at the end that puts both defaults back (a button
+		// after each field read as the one of the next field)
 		auto globalCage = new QGridLayout();
 		globalCage->setColumnStretch(1, 1);
-		globalCage->setColumnStretch(4, 1);
-		const auto addCageField = [this, globalCage](int column, const QString &title, QDoubleSpinBox *spin) {
+		globalCage->setColumnStretch(3, 1);
+		const auto addCageField = [globalCage](int column, const QString &title, QDoubleSpinBox *spin) {
 			ArtistTool::enableSpinBoxDrag(spin);
 			auto label = new QLabel(title);
 			label->setToolTip(spin->toolTip());
+			if (column > 0)
+				label->setContentsMargins(8, 0, 0, 0);
 			globalCage->addWidget(label, 0, column);
 			globalCage->addWidget(spin, 0, column + 1);
-			globalCage->addWidget(ArtistTool::makeResetButton(tip2("По умолчанию (0.05 м)", "Default (0.05 m)"), this,
-				[spin]() { spin->setValue(0.05); }), 0, column + 2);
 		};
 		addCageField(0, tr2("Вперёд", "Front"), frontalSpin_);
-		addCageField(3, tr2("Назад", "Back"), rearSpin_);
+		addCageField(2, tr2("Назад", "Back"), rearSpin_);
+		globalCage->addWidget(ArtistTool::makeResetButton(
+			tip2("Вперёд и Назад - по умолчанию (0.2 м)", "Front and Back to the default (0.2 m)"), this,
+			[this]() {
+				frontalSpin_->setValue(0.2);
+				rearSpin_->setValue(0.2);
+			}), 0, 4);
 		cageBox->addLayout(globalCage);
 		cageBox->addLayout(cageRow);
 
@@ -675,6 +750,7 @@ BakerWindow::BakerWindow(QWidget *parent)
 		"to the Surface Custom Texture slot."));
 	skewMaskButton_->setIcon(QIcon(QString::fromUtf8(":/images/icon_brush.png")));
 	skewMaskButton_->setMinimumHeight(28);
+	skewMaskButton_->setStyleSheet(ArtistTool::handWorkButtonStyle());
 	settingsLayout->addRow(QString(), skewMaskButton_);
 	connect(skewMaskButton_, &QPushButton::clicked, this, &BakerWindow::onCreateSkewMask);
 
@@ -795,10 +871,16 @@ BakerWindow::BakerWindow(QWidget *parent)
 	gpuCheck_->setToolTip(tip2(
 		"Материалы high-poly рендерятся движком в развёртку (слои, маски,\n"
 		"тайлинг, цвета) и переносятся на low-poly.\n"
-		"Выключите для чтения только базовых текстур материала.",
+		"Выключите для чтения только базовых текстур материала.\n"
+		"Материал рисуется на плоской развёртке в стороне от сцены: трипланар,\n"
+		"маски по высоте, наклону или мировым координатам дадут не тот рисунок.\n"
+		"Для таких материалов выключите.",
 		"The engine renders the high-poly materials into the unwrap (layers,\n"
 		"masks, tiling, colors) and transfers the result onto the low-poly.\n"
-		"Disable to read only the material's base textures."));
+		"Disable to read only the material's base textures.\n"
+		"The material is drawn on a flat unwrap away from the scene: triplanar\n"
+		"mapping and masks by height, slope or world position come out wrong.\n"
+		"Disable for such materials."));
 	debugLayout->addRow(tr2("Режим", "Mode"), gpuCheck_);
 	connect(gpuCheck_, &QCheckBox::toggled, this, [this](bool) { updateCaptureInfo(); });
 
@@ -826,13 +908,13 @@ BakerWindow::BakerWindow(QWidget *parent)
 	captureSizeCombo_->setToolTip(tip2(
 		"Размер GPU-захвата на поверхность high-poly. Ограничивает детализацию режима\n"
 		"\"как в рендере\" независимо от разрешения запечки.\n"
-		"Авто: min(разрешение, 2048), но не больше sqrt(лимит / (поверхности * 13 Б)),\n"
+		"Авто: min(разрешение, 2048), но не больше sqrt(лимит / (поверхности * 13 Б, 17 Б с emission)),\n"
 		"где лимит = 50% свободной ОЗУ, максимум 16 ГБ.\n"
 		"Ручной размер лимит не проверяет: при нехватке ОЗУ захваты приходят чёрными,\n"
 		"и такие поверхности печекаются из текстур материала. Расход показан внизу окна.\n",
 		"GPU capture size per high-poly surface. Caps the detail of the \"as rendered\"\n"
 		"mode regardless of the bake resolution.\n"
-		"Auto: min(resolution, 2048), limited by sqrt(budget / (surfaces * 13 B)),\n"
+		"Auto: min(resolution, 2048), limited by sqrt(budget / (surfaces * 13 B, 17 B with emission)),\n"
 		"where budget = 50% of free RAM, 16 GB max.\n"
 		"A manual size ignores the budget: if RAM runs short, captures come back black\n"
 		"and those surfaces bake from the material textures. Usage is shown at the bottom."));
@@ -951,11 +1033,31 @@ BakerWindow::BakerWindow(QWidget *parent)
 	restoreSettings();
 	refreshMeshTree();
 	setUiLocked(false);
+
+	// A bake or a probe lets the events of the editor through (its progress): the world
+	// may be closed meanwhile. It is cancelled then, before it touches the nodes again.
+	World::getEventPreWorldClear().connect(worldConns_, [this](const char *) {
+		if (baking_ || uiLocked_ || finishing_)
+		{
+			worldChanged_ = true;
+			cancelRequested_ = true;
+		}
+	});
 }
 
 BakerWindow::~BakerWindow()
 {
-	saveSettings();
+	// The settings are saved by stop(), while everything is alive: some of them are read
+	// from the Baker panel of the Debug tab, which the window of the plugin may destroy
+	// before this page. Saved here only if stop() was not called and the panel is there.
+	if (!shuttingDown_ && debugPanel_)
+		saveSettings();
+	shuttingDown_ = true;
+	remove_cage_preview();
+	// The widgets are destroyed after this, by QWidget: what they signal then must not
+	// reach the window, which is gone by then.
+	for (QObject *child : findChildren<QObject *>())
+		QObject::disconnect(child, nullptr, this, nullptr);
 	if (debugPanel_ && !debugPanel_->parent())
 		delete debugPanel_;
 }
@@ -995,8 +1097,8 @@ void BakerWindow::restoreSettings()
 	int idx = resolutionCombo_->findData(s.value("resolution", 2048).toInt());
 	if (idx >= 0)
 		resolutionCombo_->setCurrentIndex(idx);
-	frontalSpin_->setValue(s.value("frontal", 0.05).toDouble());
-	rearSpin_->setValue(s.value("rear", 0.05).toDouble());
+	frontalSpin_->setValue(s.value("frontal", 0.2).toDouble());
+	rearSpin_->setValue(s.value("rear", 0.2).toDouble());
 	idx = samplesCombo_->findData(s.value("samples", 4).toInt());
 	if (idx >= 0)
 		samplesCombo_->setCurrentIndex(idx);
@@ -1193,9 +1295,28 @@ void BakerWindow::forEachHighDecal(
 // (collectMeshes includes disabled nodes on purpose).
 void BakerWindow::setSlotHidden(bool high, bool hidden)
 {
+	// Only the nodes this switch turned off are turned on again, and only those: a node
+	// that was off before (a prefab or a decal off on purpose) stays off.
+	std::vector<int> &switchedOff = high ? highSwitchedOff_ : lowSwitchedOff_;
+	if (!hidden)
+	{
+		for (int id : switchedOff)
+			if (NodePtr node = World::getNodeByID(id))
+				node->setEnabled(true);
+		switchedOff.clear();
+		QPushButton *btn = high ? highHideButton_ : lowHideButton_;
+		btn->setText(tr2("Скрыть", "Hide"));
+		return;
+	}
+	const auto switchOff = [&switchedOff](const NodePtr &node) {
+		if (node && node->isEnabled())
+		{
+			node->setEnabled(false);
+			switchedOff.push_back(node->getID());
+		}
+	};
 	for (int id : (high ? highIds_ : lowIds_))
-		if (NodePtr node = World::getNodeByID(id))
-			node->setEnabled(!hidden);
+		switchOff(World::getNodeByID(id));
 	// decals are gathered FROM the high-poly hierarchy, so they belong to that
 	// slot: hiding the meshes while their stickers stay floating in the viewport
 	// is not what "hide the high-poly" means
@@ -1213,7 +1334,7 @@ void BakerWindow::setSlotHidden(bool high, bool hidden)
 		forEachHighHierarchyNode([&](const NodePtr &n) {
 			if (n->isDecal())
 			{
-				n->setEnabled(!hidden);
+				switchOff(n);
 				// a decal in the hierarchy that never made it into the list would
 				// also never be baked — worth naming rather than silently missing
 				if (!listedDecals.count(n->getID()))
@@ -1226,17 +1347,17 @@ void BakerWindow::setSlotHidden(bool high, bool hidden)
 				refs.push_back(n);
 		});
 		for (const NodePtr &r : refs)
-			r->setEnabled(!hidden);
-		Unigine::Log::message("Baker: hide high-poly %s: %d node reference(s) toggled as a whole "
+			switchOff(r);
+		Unigine::Log::message("Baker: hide high-poly: %d node reference(s) toggled as a whole "
 							  "(their content cannot be hidden node by node)\n",
-			hidden ? "on" : "off", int(refs.size()));
+			int(refs.size()));
 		if (!unlisted.isEmpty())
 			Unigine::Log::warning("Baker: decals in the high-poly hierarchy that are NOT in the "
 								  "participants list (they would not be baked either): %s\n",
 				unlisted.join(", ").toUtf8().constData());
 	}
 	QPushButton *btn = high ? highHideButton_ : lowHideButton_;
-	btn->setText(hidden ? tr2("Показать", "Show") : tr2("Скрыть", "Hide"));
+	btn->setText(tr2("Показать", "Show"));
 }
 
 void BakerWindow::clearSlot(bool high)
@@ -1277,6 +1398,65 @@ void BakerWindow::updateSlotLabels()
 // Rebuilds the striped participants list: a High-poly section with dark rows
 // and a Low-poly section with lighter rows (like the World Nodes hierarchy).
 // Column 1 holds the per-mesh remove button (✕).
+std::vector<QTreeWidgetItem *> BakerWindow::cagePartItems() const
+{
+	std::vector<QTreeWidgetItem *> all, selected;
+	if (!meshTree_)
+		return all;
+	for (int s = 0; s < meshTree_->topLevelItemCount(); ++s)
+	{
+		QTreeWidgetItem *section = meshTree_->topLevelItem(s);
+		// the cage lives on low-poly rows only (see the itemChanged handler)
+		const QString key = section->data(0, Qt::UserRole).toString();
+		if (!(key == "low" || key.endsWith("lo")))
+			continue;
+		for (int i = 0; i < section->childCount(); ++i)
+		{
+			QTreeWidgetItem *item = section->child(i);
+			if (!item->data(0, Qt::UserRole).toInt())
+				continue;
+			all.push_back(item);
+			if (item->isSelected())
+				selected.push_back(item);
+		}
+	}
+	return selected.empty() ? all : selected;
+}
+
+void BakerWindow::nudgeCage(float direction, float seconds)
+{
+	const std::vector<QTreeWidgetItem *> items = cagePartItems();
+	// The speed by the size of the parts (the diagonal of their bounds, d meters):
+	// 0.0125 * sqrt(d) m a second - 0.0125 for a one-meter object, 0.05 for a house of 16.
+	Math::WorldBoundBox bounds;
+	for (QTreeWidgetItem *item : items)
+	{
+		if (const NodePtr node = World::getNodeByID(item->data(0, Qt::UserRole).toInt()))
+			bounds.expand(node->getWorldBoundBox());
+	}
+	const double size = bounds.isValid() ? Math::length(bounds.maximum - bounds.minimum) : 1.0;
+	const float speed = qBound(0.001f, 0.0125f * float(std::sqrt(size)), 0.2f);
+	const float delta = direction * speed * seconds;
+
+	const float global = float(frontalSpin_->value());
+	treeUpdating_ = true;
+	for (QTreeWidgetItem *item : items)
+	{
+		const int id = item->data(0, Qt::UserRole).toInt();
+		PartCage pc = partCage_.count(id) ? partCage_[id] : PartCage();
+		const float from = pc.hasFrontal ? pc.frontal : global;
+		pc.hasFrontal = true;
+		pc.frontal = qBound(0.0001f, from + delta, 100.0f);
+		partCage_[id] = pc;
+		fillCageCells(item, id);
+	}
+	treeUpdating_ = false;
+	if (resetCageButton_)
+		resetCageButton_->setEnabled(!uiLocked_ && !partCage_.empty());
+	// The cage follows at once, not on the next tick of its timer.
+	update_cage_preview();
+}
+
 void BakerWindow::fillCageCells(QTreeWidgetItem *item, int nodeId)
 {
 	if (!item || !frontalSpin_ || !rearSpin_)
@@ -1501,7 +1681,16 @@ bool BakerWindow::eventFilter(QObject *watched, QEvent *event)
 			QTreeWidgetItem *top = item;
 			while (top->parent())
 				top = top->parent();
-			addSlotNodes(meshTree_->indexOfTopLevelItem(top) == 0, ids);
+			// By the key of the section: only High-poly and Low-poly take nodes (not the
+			// decals, not the sections of the manual groups - those take their roots).
+			const QString key = top->data(0, Qt::UserRole).toString();
+			if (manualGroups() || (key != QLatin1String("high") && key != QLatin1String("low")))
+			{
+				statusLabel_->setText(tr2("Бросьте ноду на секцию High-poly или Low-poly.",
+					"Drop the node onto the High-poly or Low-poly section."));
+				return true;
+			}
+			addSlotNodes(key == QLatin1String("high"), ids);
 			drop->acceptProposedAction();
 			return true;
 		}
@@ -1601,7 +1790,12 @@ void BakerWindow::addGroupRow()
 			{
 				int id = grabSelectedMeshGroupId(g.highLabel);
 				if (id)
+				{
+					// the node leaving the slot is shown again first
+					if (g.hideHighButton->isChecked())
+						g.hideHighButton->setChecked(false);
 					g.highId = id;
+				}
 				break;
 			}
 		updateSuggestedName();
@@ -1614,7 +1808,11 @@ void BakerWindow::addGroupRow()
 			{
 				int id = grabSelectedMeshGroupId(g.lowLabel);
 				if (id)
+				{
+					if (g.hideLowButton->isChecked())
+						g.hideLowButton->setChecked(false);
 					g.lowId = id;
+				}
 				break;
 			}
 		refreshMeshTree();
@@ -1624,6 +1822,8 @@ void BakerWindow::addGroupRow()
 		for (GroupRow &g : groupRows_)
 			if (g.box == boxPtr)
 			{
+				if (g.hideHighButton->isChecked())
+					g.hideHighButton->setChecked(false);
 				g.highId = 0;
 				g.highLabel->setText(notSet);
 				break;
@@ -1636,6 +1836,8 @@ void BakerWindow::addGroupRow()
 		for (GroupRow &g : groupRows_)
 			if (g.box == boxPtr)
 			{
+				if (g.hideLowButton->isChecked())
+					g.hideLowButton->setChecked(false);
 				g.lowId = 0;
 				g.lowLabel->setText(notSet);
 				break;
@@ -1658,6 +1860,10 @@ void BakerWindow::removeGroupRow(QGroupBox *box)
 	for (auto it = groupRows_.begin(); it != groupRows_.end(); ++it)
 		if (it->box == box)
 		{
+			// what the group hid is shown again before it goes
+			for (QPushButton *hide : {it->hideHighButton, it->hideLowButton})
+				if (hide && hide->isChecked())
+					hide->setChecked(false);
 			box->deleteLater();
 			groupRows_.erase(it);
 			break;
@@ -1734,6 +1940,8 @@ void BakerWindow::setUiLocked(bool locked)
 {
 	uiLocked_ = locked;
 	update_busy();
+	// Out of the way of the captures of a bake.
+	update_cage_preview();
 	highPickButton_->setEnabled(!locked);
 	lowPickButton_->setEnabled(!locked);
 	groupsModeCombo_->setEnabled(!locked);
@@ -1761,6 +1969,11 @@ void BakerWindow::setUiLocked(bool locked)
 		autoCageButton_->setEnabled(!locked && firstLowId() != 0);
 	if (resetCageButton_)
 		resetCageButton_->setEnabled(!locked && !partCage_.empty());
+	for (QPushButton *button : {shrinkCageButton_, growCageButton_})
+	{
+		if (button)
+			button->setEnabled(!locked && firstLowId() != 0);
+	}
 	if (meshTree_)
 		meshTree_->setEnabled(!locked);
 	bool modelsReady;
@@ -1773,7 +1986,8 @@ void BakerWindow::setUiLocked(bool locked)
 	}
 	else
 		modelsReady = !highIds_.empty() && !lowIds_.empty();
-	bakeButton_->setEnabled(!locked && modelsReady);
+	// Not while the end of a bake (the import of the textures, the material) is still on.
+	bakeButton_->setEnabled(!locked && !finishing_ && modelsReady);
 	cancelButton_->setEnabled(locked);
 }
 
@@ -1817,12 +2031,176 @@ void BakerWindow::resetSettings()
 	refreshMeshTree();
 }
 
+void BakerWindow::showEvent(QShowEvent *event)
+{
+	QWidget::showEvent(event);
+	update_cage_preview();
+}
+
+void BakerWindow::hideEvent(QHideEvent *event)
+{
+	update_cage_preview();
+	QWidget::hideEvent(event);
+}
+
+void BakerWindow::update_cage_preview()
+{
+	// The plugin is being unloaded: the widgets may be destroyed already (the hide events
+	// and the signals of the window going away still come).
+	if (shuttingDown_)
+		return;
+	const bool wanted = showCageButton_ && showCageButton_->isChecked() && isVisible() && !uiLocked_ && !finishing_;
+	if (cageTimer_)
+	{
+		if (wanted && !cageTimer_->isActive())
+			cageTimer_->start();
+		else if (!wanted && showCageButton_ && !showCageButton_->isChecked())
+			cageTimer_->stop();
+	}
+	std::vector<Ptr<ObjectMeshStatic>> lows;
+	if (wanted)
+	{
+		for (const BakeCore::BakeGroup &group : buildProbeGroups())
+			lows.insert(lows.end(), group.lows.begin(), group.lows.end());
+	}
+	if (lows.empty())
+	{
+		// Not drawn; kept for when it is wanted again.
+		cageConns_.disconnectAll();
+		cageDrawing_ = false;
+		if (visualizerRequested_)
+		{
+			ArtistTool::releaseVisualizer();
+			visualizerRequested_ = false;
+		}
+		return;
+	}
+
+	// The shell: made anew when the parts change - which they are, their meshes, where they
+	// are, which surfaces are baked.
+	QByteArray shellSignature;
+	const auto put = [](QByteArray &to, const void *data, size_t size) { to.append(static_cast<const char *>(data), int(size)); };
+	for (const Ptr<ObjectMeshStatic> &low : lows)
+	{
+		const int id = low->getID();
+		const Math::Mat4 transform = low->getWorldTransform();
+		put(shellSignature, &id, sizeof(id));
+		put(shellSignature, &transform, sizeof(transform));
+		shellSignature.append(low->getMeshPath());
+		for (int s = 0; s < low->getNumSurfaces(); ++s)
+			shellSignature.append(BakeCore::isSurfaceBakeable(low, s) ? '1' : '0');
+	}
+	if (shellSignature != cageShellSignature_)
+	{
+		cageShell_ = BakeCore::buildCageShell(lows);
+		cageShellSignature_ = shellSignature;
+		cageSignature_.clear();
+	}
+
+	// The corners: the shell moved off by the distances of the parts (their own, else the
+	// global one) - again only when one of them changes.
+	const float defaultFrontal = float(frontalSpin_->value());
+	QByteArray signature;
+	put(signature, &defaultFrontal, sizeof(defaultFrontal));
+	for (const auto &entry : partCage_)
+	{
+		if (!entry.second.hasFrontal)
+			continue;
+		put(signature, &entry.first, sizeof(entry.first));
+		put(signature, &entry.second.frontal, sizeof(entry.second.frontal));
+	}
+	if (signature != cageSignature_)
+	{
+		cageTriangles_.clear();
+		cageEdges_.clear();
+		const BakeCore::CageShell &shell = cageShell_;
+		cageTriangles_.reserve(shell.points.size());
+		int lastPart = 0;
+		float distance = defaultFrontal;
+		for (size_t i = 0; i < shell.points.size(); ++i)
+		{
+			const int part = shell.part[i / 3];
+			if (i == 0 || part != lastPart)
+			{
+				lastPart = part;
+				const auto it = partCage_.find(part);
+				distance = it != partCage_.end() && it->second.hasFrontal ? it->second.frontal : defaultFrontal;
+				distance = std::max(distance, 1e-5f);
+			}
+			cageTriangles_.push_back(shell.origin
+				+ Math::Vec3(shell.points[i] + shell.normals[i] * (distance * shell.shell[i])));
+		}
+		cageEdges_.reserve(shell.edges.size());
+		for (int corner : shell.edges)
+			cageEdges_.push_back(cageTriangles_[size_t(corner)]);
+		cageSignature_ = signature;
+	}
+	if (cageTriangles_.empty())
+	{
+		// Nothing to draw: as when it is not wanted.
+		cageConns_.disconnectAll();
+		cageDrawing_ = false;
+		if (visualizerRequested_)
+		{
+			ArtistTool::releaseVisualizer();
+			visualizerRequested_ = false;
+		}
+		return;
+	}
+	// Drawn every frame while it is wanted; the Visualizer is turned on for it.
+	if (!visualizerRequested_)
+	{
+		ArtistTool::requestVisualizer();
+		visualizerRequested_ = true;
+	}
+	if (!cageDrawing_)
+	{
+		cageDrawing_ = true;
+		Engine::get()->getEventEndWorldUpdate().connect(cageConns_, [this]() { draw_cage(); });
+	}
+}
+
+void BakerWindow::draw_cage() const
+{
+	// See-through faces, edges clearly seen.
+	const Math::vec4 face(0.25f, 0.75f, 1.0f, 0.3f);
+	const Math::vec4 edge(0.35f, 0.85f, 1.0f, 0.9f);
+	for (size_t i = 0; i + 2 < cageTriangles_.size(); i += 3)
+		Visualizer::renderTriangle3D(cageTriangles_[i], cageTriangles_[i + 1], cageTriangles_[i + 2], face);
+	for (size_t i = 0; i + 1 < cageEdges_.size(); i += 2)
+		Visualizer::renderLine3D(cageEdges_[i], cageEdges_[i + 1], edge);
+}
+
+void BakerWindow::remove_cage_preview()
+{
+	if (cageTimer_)
+		cageTimer_->stop();
+	cageConns_.disconnectAll();
+	cageDrawing_ = false;
+	if (visualizerRequested_)
+	{
+		ArtistTool::releaseVisualizer();
+		visualizerRequested_ = false;
+	}
+	cageTriangles_.clear();
+	cageEdges_.clear();
+	cageSignature_.clear();
+	cageShell_ = BakeCore::CageShell();
+	cageShellSignature_.clear();
+}
+
 void BakerWindow::stop()
 {
+	if (!shuttingDown_)
+		saveSettings();
+	remove_cage_preview();
+	shuttingDown_ = true;
 	if (property("artist_tool_busy").toBool())
 		cancelBake();
-	// The plugin goes away: the readbacks still on their way are taken in now.
-	for (int attempt = 0; attempt < 20 && BakeGpu::transfersInFlight() > 0; ++attempt)
+	worldConns_.disconnectAll();
+	// The plugin goes away: the readbacks still on their way are taken in now (their
+	// callbacks are code of the plugin), for up to two seconds.
+	for (int attempt = 0; attempt < 200 && BakeGpu::transfersInFlight() > 0; ++attempt)
 	{
 		BakeGpu::flushTransfers();
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -1916,9 +2294,10 @@ void BakerWindow::onCreateSkewMask()
 	// (viewport-only: baking ignores the hidden state)
 	if (manualGroups())
 	{
+		// through the Hide of each group: its Show then brings them back
 		for (const GroupRow &g : groupRows_)
-			for (const Ptr<ObjectMeshStatic> &part : BakeCore::collectMeshes(World::getNodeByID(g.highId)))
-				part->setEnabled(false);
+			if (g.highId && !g.hideHighButton->isChecked())
+				g.hideHighButton->setChecked(true);
 	}
 	else if (!highIds_.empty() && !highHideButton_->isChecked())
 		highHideButton_->setChecked(true); // triggers setSlotHidden(true, true)
@@ -2046,11 +2425,17 @@ int BakerWindow::estimateCaptureSurfaces() const
 	return n;
 }
 
+double BakerWindow::ramBytesPerTexel() const
+{
+	const bool emission = emissionCheck_ && emissionCheck_->isChecked();
+	return (emission ? 4.0 : 3.0) * 4.0 + 1.0;
+}
+
 int BakerWindow::computeCaptureSize(int surfaceCount, CaptureBudget *outBudget) const
 {
 	// per surface and per texel in SYSTEM RAM: 3 RGBA8 gbuffer images read back
-	// from the GPU + 1 coverage byte
-	const double bytesPerTexel = 3.0 * 4.0 + 1.0;
+	// from the GPU (4 with the emission) + 1 coverage byte
+	const double bytesPerTexel = ramBytesPerTexel();
 	// ...and in VIDEO memory: one RGBA8 render target per gbuffer image, plus a
 	// fourth one when the emission pass is on.
 	//
@@ -2151,7 +2536,7 @@ void BakerWindow::updateCaptureInfo()
 	CaptureBudget b;
 	const int size = computeCaptureSize(n, &b);
 	const double texels = double(n) * double(size) * double(size);
-	const double useGb = texels * 13.0 / 1e9;
+	const double useGb = texels * ramBytesPerTexel() / 1e9;
 	const bool emission = emissionCheck_ && emissionCheck_->isChecked();
 	const int chunk = b.chunk > 0 ? b.chunk : 1;
 	const double peakVram
@@ -2199,9 +2584,18 @@ void BakerWindow::onAutoCage()
 	}
 
 	cancelRequested_ = false;
+	worldChanged_ = false;
 	setUiLocked(true);
 	statusLabel_->setText(tr2("Промер кейджа...", "Probing the cage..."));
 	QCoreApplication::processEvents();
+	// Cancelled meanwhile, or the world closed: the nodes of 'groups' may be gone.
+	if (cancelRequested_)
+	{
+		cancelRequested_ = false;
+		setUiLocked(false);
+		statusLabel_->setText(tr2("Промер отменён — дистанции не изменены.", "Probe cancelled - distances left unchanged."));
+		return;
+	}
 
 	// Cancel stops the probe, as it stops a bake.
 	auto progress = [this](int percent, const char *text) -> bool {
@@ -2455,6 +2849,7 @@ void BakerWindow::startBake()
 
 	baking_ = true;
 	cancelRequested_ = false;
+	worldChanged_ = false;
 	setUiLocked(true);
 	progressBar_->setValue(0);
 	progressBase_ = 0; // CPU mode: ray tracing owns the whole bar
@@ -2516,7 +2911,7 @@ void BakerWindow::startBake()
 					"the whole set, %d capture(s) per chunk = %.2f GB VRAM peak\n",
 					n, captureSize_, b.manual ? "manual" : "auto",
 					b.vramLimited ? ", size cut to fit VRAM" : "", b.ramFree / 1e9,
-					b.ramBudget / 1e9, b.vramFree / 1e9, b.vramBudget / 1e9, texels * 13.0 / 1e9,
+					b.ramBudget / 1e9, b.vramFree / 1e9, b.vramBudget / 1e9, texels * ramBytesPerTexel() / 1e9,
 					captureChunk_,
 					double(captureChunk_) * double(captureSize_) * double(captureSize_)
 						* perTexelVram / 1e9);
@@ -2575,6 +2970,9 @@ void BakerWindow::performCaptures()
 		Render::setForceStreaming(prevForceStreaming);
 		warmupDone_ = true;
 		warmupTime_ = std::chrono::steady_clock::now();
+		// The warm-up of a heavy model can take long by itself: the captures get their
+		// whole allowance after it, not what is left of it.
+		captureDeadline_ = warmupTime_ + std::chrono::seconds(25);
 		return; // stay subscribed; the real captures run on a later frame
 	}
 	// give texture streaming and shader compilation time to finish
@@ -2795,7 +3193,8 @@ void BakerWindow::runBake()
 		~Finishing()
 		{
 			window->finishing_ = false;
-			window->update_busy();
+			// Bake is pressed again only now, with the textures imported.
+			window->setUiLocked(window->uiLocked_);
 		}
 	} finishing(this);
 
@@ -2856,6 +3255,7 @@ void BakerWindow::runBake()
 	// importAssetSync — reimport fails on unknown assets.
 	statusLabel_->setText(tr2("Импорт текстур...", "Importing textures..."));
 	QCoreApplication::processEvents();
+	QStringList notImported;
 	for (const Unigine::String &path : {result.albedoPath, result.shadingPath, result.normalPath, result.emissionPath})
 	{
 		if (path.empty())
@@ -2865,12 +3265,31 @@ void BakerWindow::runBake()
 			? UnigineEditor::AssetManager::reimportAssetSync(path.get())
 			: UnigineEditor::AssetManager::importAssetSync(path.get());
 		if (!imported)
+		{
 			Unigine::Log::warning("Baker: %s failed for \"%s\"\n",
 				wasAsset ? "reimport" : "import", path.get());
+			notImported << QString::fromUtf8(path.get());
+		}
+	}
+	// A texture not imported: the material would get a missing file or the old import of
+	// it. It is not assigned; the textures are saved and can be imported by hand.
+	if (!notImported.isEmpty())
+	{
+		progressBar_->setValue(0);
+		statusLabel_->setText(tr2("Не удалось импортировать: %1. Материал не назначен.",
+			"Could not import: %1. The material is not assigned.").arg(notImported.join(QString::fromUtf8(", "))));
+		return;
 	}
 
 	statusLabel_->setText(tr2("Назначение материала...", "Assigning the material..."));
 	QCoreApplication::processEvents();
+	// The world changed while the textures were imported: its nodes are gone.
+	if (worldChanged_)
+	{
+		statusLabel_->setText(tr2("Мир сменился: текстуры сохранены, материал не назначен.",
+			"The world changed: the textures are saved, the material is not assigned."));
+		return;
+	}
 	BakeCore::assignMaterial(groups, result);
 
 	QString report = tr2("Готово. Сохранено:", "Done. Saved:");
@@ -2884,5 +3303,10 @@ void BakerWindow::runBake()
 		report += QString("\n  %1").arg(QString::fromUtf8(result.emissionPath.get()));
 	if (!result.materialPath.empty())
 		report += tr2("\nМатериал: %1", "\nMaterial: %1").arg(QString::fromUtf8(result.materialPath.get()));
+	if (result.uvTransformKept)
+		report += tr2("\nУ материала тайлинг (uv_transform), а запечены не все его карты: тайлинг оставлен, "
+			"новые карты тоже тайлятся. Запеките все карты.",
+			"\nThe material tiles (uv_transform) and not all its maps were baked: the tiling is kept, "
+			"the new maps tile too. Bake all the maps.");
 	statusLabel_->setText(report);
 }

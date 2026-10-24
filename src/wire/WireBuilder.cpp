@@ -33,9 +33,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
+#include <QRandomGenerator>
 #include <QMap>
 #include <QPair>
 #include <QRegularExpression>
+#include <QSet>
 
 #include <algorithm>
 #include <cmath>
@@ -130,6 +132,9 @@ const char *const POLE_ROLE_KEYS[POLE_ROLES] = {"pattern", "start", "end", "corn
 const int MAX_POLES = 5000;
 // How far above and below the curve the ground under a pole is searched for.
 const double GROUND_UP = 5.0;
+// When that finds nothing (it started inside the ground, under a hill), the ray is cast
+// again from this high above.
+const double GROUND_FAR_UP = 1000.0;
 const double GROUND_DOWN = 100.0;
 
 // The most wires a line may have, and the most triangles all of them together.
@@ -167,14 +172,50 @@ NodePtr find_line_root(const NodePtr &node)
 	return NodePtr();
 }
 
-// The material of the strips and the tubes: the one of the settings if it suits a mesh,
-// else the base one.
-MaterialPtr wire_material(const QString &material)
+// The materials that come with the plugin (data/zloy_pingvin/artist_tool/materials), the
+// default ones of the wires: crossed strips with alpha, and a ribbon or a tube.
+const char CROSS_MATERIAL_GUID[] = "1b923e266540a4cffb2e31fed6892161844c2f89"; // wire_alpha_blend
+const char SOLID_MATERIAL_GUID[] = "e8105cac207eefb516f037923dd087dfbc2d2962"; // wire_solid
+
+// A material of a mesh by the GUID of its file; null if there is none, or not one a mesh
+// can have.
+MaterialPtr mesh_material(const QString &guid)
 {
-	MaterialPtr result = Materials::findMaterialByFileGUID(guidOf(material));
-	if (!result || !result->isNodeTypeSupported(Node::OBJECT_MESH_STATIC))
-		result = Materials::findManualMaterial("Unigine::mesh_base");
-	return result;
+	const MaterialPtr material = Materials::findMaterialByFileGUID(guidOf(guid));
+	return material && material->isNodeTypeSupported(Node::OBJECT_MESH_STATIC) ? material : MaterialPtr();
+}
+
+// The material of the strips and the tubes when none is picked: the one that comes with the
+// plugin for the shape, or the base one if it is gone from the project.
+MaterialPtr default_wire_material(WireShapeKind shape)
+{
+	if (const MaterialPtr material = mesh_material(QString::fromUtf8(shape == WIRE_SHAPE_CROSS ? CROSS_MATERIAL_GUID : SOLID_MATERIAL_GUID)))
+		return material;
+	return Materials::findManualMaterial("Unigine::mesh_base");
+}
+
+// The material of the strips and the tubes: the one of the settings if it suits a mesh,
+// the default one of the shape if none is picked, else the base one.
+MaterialPtr wire_material(const QString &material, WireShapeKind shape)
+{
+	if (material.isEmpty())
+		return default_wire_material(shape);
+	if (const MaterialPtr result = mesh_material(material))
+		return result;
+	return Materials::findManualMaterial("Unigine::mesh_base");
+}
+
+// Whether the material is one a wire gets by default (of any shape): such a material of a
+// piece follows the shape, a material given by hand stays.
+bool is_default_wire_material(const UGUID &material)
+{
+	for (const MaterialPtr &candidate : {mesh_material(QString::fromUtf8(CROSS_MATERIAL_GUID)),
+			mesh_material(QString::fromUtf8(SOLID_MATERIAL_GUID)), Materials::findManualMaterial("Unigine::mesh_base")})
+	{
+		if (candidate && candidate->getGUID() == material)
+			return true;
+	}
+	return false;
 }
 
 // The rotation a point was given with the manipulator (see POINT_TURN_DATA); none - none.
@@ -405,6 +446,11 @@ WireSettings from_json(const QJsonObject &json)
 
 } // namespace
 
+int WireBuilder::randomSeed()
+{
+	return int(QRandomGenerator::global()->bounded(std::numeric_limits<int>::max()));
+}
+
 WireBuilder::WireBuilder(QObject *parent)
 	: QObject(parent)
 {
@@ -437,9 +483,7 @@ void WireBuilder::setActive(bool active)
 	{
 		CurveEditor::recoverManipulators();
 		// The wires are drawn with the Visualizer too, once per frame.
-		saved_visualizer_mode_ = Visualizer::getMode();
-		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
-			Visualizer::setMode(Visualizer::MODE_ENABLED_DEPTH_TEST_ENABLED);
+		requestVisualizer();
 		Engine::get()->getEventEndWorldUpdate().connect(connections_, this, &WireBuilder::update);
 		// Hidden pieces are saved shown; they are hidden again on the next frame.
 		World::getEventPreWorldSave().connect(connections_, [this](const char *) { show_hidden_pieces(); });
@@ -461,8 +505,7 @@ void WireBuilder::setActive(bool active)
 		show_hidden_pieces();
 		qApp->removeEventFilter(this);
 		connections_.disconnectAll();
-		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
-			Visualizer::setMode(Visualizer::MODE_DISABLED);
+		releaseVisualizer();
 	}
 }
 
@@ -697,6 +740,8 @@ void WireBuilder::create_root(const WireSettings &start_settings, bool curve)
 	// The settings are a part of making it, not a step of their own.
 	root_ = root;
 	settings_ = limited(start_settings);
+	// Every new line its own random sags and turns.
+	settings_.seed = randomSeed();
 	settings_changed();
 	settings_.folder.clear();
 	save_settings(false);
@@ -1570,8 +1615,13 @@ Math::Vec3 WireBuilder::on_ground(const Math::Vec3 &position) const
 	{
 		if (pole_ground_.size() > 1000000)
 			pole_ground_.clear();
-		const SurfaceHit hit = raycastSurface(position + Math::Vec3(0.0, 0.0, GROUND_UP), position - Math::Vec3(0.0, 0.0, GROUND_DOWN),
+		SurfaceHit hit = raycastSurface(position + Math::Vec3(0.0, 0.0, GROUND_UP), position - Math::Vec3(0.0, 0.0, GROUND_DOWN),
 			settings_.ground, ground_ignore());
+		// The curve under a hill (between points in two valleys): the ray starts inside
+		// the ground and finds nothing; again from high above.
+		if (!hit.found)
+			hit = raycastSurface(position + Math::Vec3(0.0, 0.0, GROUND_FAR_UP), position - Math::Vec3(0.0, 0.0, GROUND_DOWN),
+				settings_.ground, ground_ignore());
 		it = pole_ground_.insert(key, hit.found ? double(hit.point.z) : NO_GROUND);
 	}
 	return no_ground(it.value()) ? position : Math::Vec3(position.x, position.y, Math::Scalar(it.value()));
@@ -1628,8 +1678,9 @@ void WireBuilder::keep_above_ground(WireSpan &span) const
 	// The rays start above the higher end of the wire: the wire is below it everywhere.
 	const double top = qMax(double(span.from.z), double(span.to.z)) + GROUND_UP;
 	const Vector<NodePtr> &ignore = ground_ignore();
-	// Over the ground by half the thickness, so that a lying wire is not cut by it.
-	const double clearance = qMax(double(settings_.thickness) * 0.5, 0.01);
+	// Over the ground by half the thickness (of this span), so that a lying wire is not cut
+	// by it.
+	const double clearance = qMax(double(settings_.thickness) * double(span.thickness_scale) * 0.5, 0.01);
 	if (ground_heights_.size() > 1000000)
 		ground_heights_.clear();
 
@@ -1643,8 +1694,12 @@ void WireBuilder::keep_above_ground(WireSpan &span) const
 		auto it = ground_heights_.constFind(key);
 		if (it == ground_heights_.constEnd())
 		{
-			const SurfaceHit hit = raycastSurface(Math::Vec3(place.x, place.y, Math::Scalar(top)),
+			SurfaceHit hit = raycastSurface(Math::Vec3(place.x, place.y, Math::Scalar(top)),
 				Math::Vec3(place.x, place.y, Math::Scalar(top - GROUND_DOWN - 1000.0)), settings_.ground, ignore);
+			// A crest higher than both ends of the wire: the ray starts inside it.
+			if (!hit.found)
+				hit = raycastSurface(Math::Vec3(place.x, place.y, Math::Scalar(top + GROUND_FAR_UP)),
+					Math::Vec3(place.x, place.y, Math::Scalar(top - GROUND_DOWN - 1000.0)), settings_.ground, ignore);
 			it = ground_heights_.insert(key, hit.found ? double(hit.point.z) : NO_GROUND);
 		}
 		return it.value();
@@ -1762,16 +1817,23 @@ void WireBuilder::sync_poles()
 	for (int i = 0, num = holder->getNumChildren(); i < num; ++i)
 	{
 		const NodePtr pole = holder->getChild(i);
-		unused[dataString(pole, POLE_SOURCE_DATA)].append(pole);
+		// Only the poles the tool made (they know their asset): a node the user put among
+		// them is left where it is, not put away as a spare (spares are not saved).
+		const QString source = dataString(pole, POLE_SOURCE_DATA);
+		if (!source.isEmpty())
+			unused[source].append(pole);
 	}
-	// Then the spare ones: a pole that comes back is the one that was there.
+	// Then the spare ones: a pole that comes back is the one that was there. They are a
+	// stack - the last one put away comes back first (see below how they are put away).
 	NodePtr spare = findChildNode(root_, SPARE_POLES_NODE_NAME);
+	QSet<int> spare_ids;
 	if (spare)
 	{
-		for (int i = 0, num = spare->getNumChildren(); i < num; ++i)
+		for (int i = spare->getNumChildren() - 1; i >= 0; --i)
 		{
 			const NodePtr pole = spare->getChild(i);
 			unused[dataString(pole, POLE_SOURCE_DATA)].append(pole);
+			spare_ids.insert(pole->getID());
 		}
 	}
 
@@ -1881,11 +1943,16 @@ void WireBuilder::sync_poles()
 		node->setSaveToWorldEnabled(false);
 		spare = node;
 	}
+	// Put away last first: on the top of the stack is the first of them along the line, the
+	// one that comes back first when the line gets longer again (A B C D -> A B -> A
+	// leaves D C B; back to A B takes B, to A B C D then C and D).
 	for (auto it = unused.constBegin(); it != unused.constEnd(); ++it)
 	{
-		for (const NodePtr &pole : it.value())
+		const QVector<NodePtr> &poles = it.value();
+		for (int i = int(poles.size()) - 1; i >= 0; --i)
 		{
-			if (!pole->getParent() || pole->getParent()->getID() != spare->getID())
+			const NodePtr &pole = poles[i];
+			if (!spare_ids.contains(pole->getID()))
 				pole->setWorldParent(spare);
 		}
 	}
@@ -2085,19 +2152,12 @@ void WireBuilder::setSettings(const WireSettings &settings)
 
 void WireBuilder::resetSettings()
 {
+	// All as a new line has them; only Closed (the shape of the curve) and the folder of its
+	// files stay.
 	WireSettings settings;
-	settings.attach_name = settings_.attach_name;
 	settings.closed = settings_.closed;
-	settings.pole_parts = settings_.pole_parts;
-	settings.pole_forward = settings_.pole_forward;
-	settings.shape = settings_.shape;
-	settings.material = settings_.material;
-	settings.mesh_source = settings_.mesh_source;
-	settings.mesh_kind = settings_.mesh_kind;
-	settings.mesh_name = settings_.mesh_name;
-	settings.mesh_forward = settings_.mesh_forward;
-	settings.mesh_up = settings_.mesh_up;
 	settings.folder = settings_.folder;
+	settings.seed = randomSeed();
 	setSettings(settings);
 	report(MSG_INFO, QString());
 }
@@ -2205,10 +2265,13 @@ void WireBuilder::rebuild(const QVector<WireEnds> &ends)
 		if (mesh_source_.isEmpty())
 			return;
 		copy_length = double(bendBounds(mesh_source_, mesh_axes()).length());
+		// The source loaded (it stays loaded while its file is the same): the error of an
+		// axis without length is of the axes as they are now.
+		if (mesh_error_ == axis_length_error())
+			mesh_error_.clear();
 		if (copy_length < 1e-4)
 		{
-			mesh_error_ = uiText("The mesh has no length along its forward axis: pick another axis.",
-				"У меша нет длины вдоль «Оси вперёд»: выберите другую ось.");
+			mesh_error_ = axis_length_error();
 			return;
 		}
 	}
@@ -2241,6 +2304,7 @@ void WireBuilder::rebuild(const QVector<WireEnds> &ends)
 			double(settings_.max_segment_length), span);
 		if (span.isEmpty())
 			continue;
+		span.thickness_scale = float(end.thickness_scale);
 		if (settings_.above_ground)
 			keep_above_ground(span);
 		span.random = random_of(pole_a, pole_b, key, 3);
@@ -2361,6 +2425,12 @@ void WireBuilder::find_cuts()
 	}
 }
 
+QString WireBuilder::axis_length_error()
+{
+	return uiText("The mesh has no length along its forward axis: pick another axis.",
+		"У меша нет длины вдоль «Оси вперёд»: выберите другую ось.");
+}
+
 void WireBuilder::load_mesh_source()
 {
 	if (mesh_source_path_ == settings_.mesh_source && !mesh_source_path_.isEmpty())
@@ -2412,7 +2482,7 @@ void WireBuilder::apply_materials(const ObjectPtr &object, const PieceState *kee
 		return;
 	const bool mesh = settings_.shape == WIRE_SHAPE_MESH;
 	const QStringList names = mesh ? mesh_surface_names() : QStringList();
-	const MaterialPtr material = mesh ? MaterialPtr() : wire_material(settings_.material);
+	const MaterialPtr material = mesh ? MaterialPtr() : wire_material(settings_.material, settings_.shape);
 	for (int surface = 0; surface < object->getNumSurfaces(); ++surface)
 	{
 		if (keep)
@@ -2420,6 +2490,10 @@ void WireBuilder::apply_materials(const ObjectPtr &object, const PieceState *kee
 			if (const PieceState::Surface *settings = keep->surface(object->getSurfaceName(surface)))
 			{
 				PieceState::putSurface(object, surface, *settings);
+				// A default material follows the shape (alpha for a cross, solid for a
+				// ribbon or a tube); one given by hand stays.
+				if (!mesh && material && settings_.material.isEmpty() && is_default_wire_material(settings->material))
+					object->setMaterial(material, surface);
 				continue;
 			}
 		}
@@ -2672,7 +2746,7 @@ void WireBuilder::set_material(const QString &material)
 	save_settings(true, false);
 	if (settings_.shape != WIRE_SHAPE_MESH)
 	{
-		const MaterialPtr wire = wire_material(material);
+		const MaterialPtr wire = wire_material(material, settings_.shape);
 		SetMaterialsAction *action = new SetMaterialsAction;
 		const NodePtr holder = mesh_node();
 		for (int i = 0, num = holder->getNumChildren(); i < num; ++i)
@@ -2690,6 +2764,16 @@ void WireBuilder::set_material(const QString &material)
 	notify_changed();
 }
 
+QString WireBuilder::getDefaultMaterialName() const
+{
+	const MaterialPtr material = default_wire_material(settings_.shape);
+	if (!material || !material->getFileGUID().isValid())
+		return QString::fromUtf8("mesh_base");
+	// The path of the asset, not the one of the material (the runtime file, named by GUID).
+	const QString path = QString::fromUtf8(FileSystem::getVirtualPath(material->getFileGUID()).get());
+	return path.isEmpty() ? QString::fromUtf8("mesh_base") : QFileInfo(path).completeBaseName();
+}
+
 QString WireBuilder::getMaterialName() const
 {
 	const UGUID guid = guidOf(settings_.material);
@@ -2701,7 +2785,14 @@ QString WireBuilder::getMaterialName() const
 
 bool WireBuilder::showMaterial() const
 {
-	const UGUID file = guidOf(settings_.material);
+	// None picked: the default one of the shape, if it is a file of the project.
+	QString picked = settings_.material;
+	if (picked.isEmpty())
+	{
+		if (const MaterialPtr material = default_wire_material(settings_.shape))
+			picked = QString::fromUtf8(material->getFileGUID().makeString().get());
+	}
+	const UGUID file = guidOf(picked);
 	if (!hasLine() || !file.isValid())
 		return false;
 	const String path = FileSystem::getVirtualPath(file);
@@ -2943,8 +3034,13 @@ bool WireBuilder::generate()
 		NodePtr node;
 		if (pattern)
 		{
+			// A copy of the first piece, with what was set on it by hand; a surface the
+			// first piece lacks (the LOD, another shape) gets the settings of the line.
+			const PieceState first = PieceState::of(pattern);
 			node = pattern->clone();
-			checked_ptr_cast<ObjectMeshStatic>(node)->setMeshPath(mesh_path.get());
+			ObjectMeshStaticPtr object = checked_ptr_cast<ObjectMeshStatic>(node);
+			object->setMeshPath(mesh_path.get());
+			apply_materials(object, &first);
 		} else
 		{
 			ObjectMeshStaticPtr object = ObjectMeshStatic::create(mesh_path.get());

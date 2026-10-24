@@ -115,7 +115,7 @@ struct WireSettings
 	// How the wires are cut into segments: a wire turns by at most this many degrees from
 	// one segment to the next (more segments where it bends more), has at least
 	// min_segments of them, and none longer than max_segment_length units (0 - no limit).
-	float segment_angle{2.0f};
+	float segment_angle{3.0f};
 	// A wire that would hang below the ground lies on it there instead.
 	bool above_ground{false};
 	int min_segments{4};
@@ -162,8 +162,8 @@ struct WireSettings
 	float piece_size{100.0f};
 	// From what distance to the camera the wires start to fade out, and over what distance
 	// they fade out then, in units, as on a decal. 0 - always seen / no fading.
-	float visible_distance{0.0f};
-	float fade_distance{0.0f};
+	float visible_distance{125.0f};
+	float fade_distance{25.0f};
 	// A LOD of the strips and the tubes: the same wires with lod_factor times fewer
 	// segments, seen from lod_distance on, faded over lod_fade.
 	bool lod{false};
@@ -227,6 +227,8 @@ public:
 	int getLineId() const;
 
 	bool hasLine() const;
+	// A random seed: every new line gets one, so that two lines never hang alike.
+	static int randomSeed();
 	QString getLineName() const;
 	int getNumPoles() const;
 	int getNumPieces() const;
@@ -314,8 +316,8 @@ public:
 	// in the field being typed in.
 	int getSettingsRevision() const { return settings_revision_; }
 	void setSettings(const WireSettings &settings);
-	// Puts the settings of the line back to their defaults. What it is made of (the
-	// shape, the material, the mesh), its folder and Closed stay.
+	// Puts all the settings of the line back to the defaults of a new line; only its
+	// folder and Closed stay.
 	void resetSettings();
 
 	// Takes the first material among the GUIDs (picked in the asset dialog or dropped:
@@ -324,7 +326,12 @@ public:
 	bool takeMaterial(const Unigine::Vector<Unigine::UGUID> &guids);
 	bool showMaterial() const;
 	void clearMaterial();
+	// The name of the material picked; empty - none picked, the default one of the shape is
+	// used (getDefaultMaterialName()).
 	QString getMaterialName() const;
+	// wire_alpha_blend for a cross, wire_solid for a ribbon or a tube (they come with the
+	// plugin), mesh_base if they are gone from the project.
+	QString getDefaultMaterialName() const;
 	// Takes the asset among the GUIDs as the mesh laid along the wires.
 	bool takeMesh(const Unigine::Vector<Unigine::UGUID> &guids);
 	// Selects that asset in the Asset Browser.
@@ -483,6 +490,8 @@ private:
 	// Lifts the part of a wire that goes below the ground onto it (see
 	// WireSettings::above_ground).
 	void keep_above_ground(WireSpan &span) const;
+	// The error of a mesh without length along its forward axis.
+	static QString axis_length_error();
 
 	// The wires the line has now, from its poles.
 	QVector<WireEnds> wire_ends() const;
@@ -604,7 +613,6 @@ private:
 	bool discard_if_empty_{false};
 
 	Unigine::EventConnections connections_;
-	Unigine::Visualizer::MODE saved_visualizer_mode_{Unigine::Visualizer::MODE_DISABLED};
 };
 
 } // namespace ArtistTool

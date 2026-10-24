@@ -328,7 +328,9 @@ struct TargetTri
 	vec3 n0, n1, n2;    // world-space shading normals
 	vec3 t0, t1, t2;    // world-space tangents
 	float signW;        // binormal orientation (sign of quat w)
+	bool mirrored = false; // the part is mirrored (negative scale): its winding is reversed
 	vec3 r0, r1, r2;    // world-space smoothed cage normals (ray directions)
+	float s0 = 1.0f, s1 = 1.0f, s2 = 1.0f; // how many frontal distances the cage is off the corner (CageNormals::shell)
 	vec3 faceN;         // world-space geometric normal (skew-mask ray direction)
 	vec2 uv0, uv1, uv2; // UV0
 	int group = 0;      // rays trace only into this bake group's high-poly set
@@ -370,11 +372,102 @@ struct QuantizedPos
 	}
 };
 
+// The emission is gathered linear (as the renderer adds it up: the color of the map
+// decoded, times the scale) and encoded as sRGB when the map is written.
+float srgbToLinear(float c)
+{
+	return c <= 0.04045f ? c / 12.92f : Math::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+float linearToSrgb(float c)
+{
+	return c <= 0.0031308f ? c * 12.92f : 1.055f * Math::pow(c, 1.0f / 2.4f) - 0.055f;
+}
+
+vec3 srgbToLinear(const vec3 &c)
+{
+	return vec3(srgbToLinear(c.x), srgbToLinear(c.y), srgbToLinear(c.z));
+}
+
 QuantizedPos quantize(const vec3 &p)
 {
 	const double q = 1.0 / 1e-5; // 0.01 mm cells
 	return {std::llround(double(p.x) * q), std::llround(double(p.y) * q), std::llround(double(p.z) * q)};
 }
+
+// The cage, as Shrink/Fatten (Alt+S) with Offset Even makes it in Blender: the vertices,
+// merged by position so that the cage does not split at hard edges and UV seams, go along
+// the face normals around them weighted by the angles of the corners there (a narrow face
+// next to large ones - the edge of a roof - counts as much as they do; weighted by the
+// area it would be pushed along them, not off), and as far as it takes for every face
+// around to be moved off by the whole distance (1 / cos of the angle between the vertex
+// normal and the face normal, weighted by the angles too).
+class CageNormals
+{
+public:
+	void addTriangle(const vec3 &p0, const vec3 &p1, const vec3 &p2)
+	{
+		const vec3 fn = cross(p1 - p0, p2 - p0);
+		if (length2(fn) < 1e-20f)
+			return;
+		const vec3 unit = normalize(fn);
+		const vec3 p[3] = {p0, p1, p2};
+		for (int k = 0; k < 3; k++)
+		{
+			const vec3 a = p[(k + 1) % 3] - p[k];
+			const vec3 b = p[(k + 2) % 3] - p[k];
+			if (length2(a) < 1e-20f || length2(b) < 1e-20f)
+				continue;
+			const float angle = Math::acos(Math::clamp(dot(normalize(a), normalize(b)), -1.0f, 1.0f));
+			if (angle <= 0.0f)
+				continue;
+			Corner &corner = corners_[quantize(p[k])];
+			corner.sum += unit * angle;
+			corner.faces.push_back({unit, angle});
+		}
+	}
+
+	// The direction the cage goes off the vertex at 'p'.
+	vec3 at(const vec3 &p, const vec3 &fallback) const
+	{
+		const auto it = corners_.find(quantize(p));
+		if (it == corners_.end() || length2(it->second.sum) < 1e-20f)
+			return fallback;
+		return normalize(it->second.sum);
+	}
+
+	// How many times the distance the vertex at 'p' goes along at(): 1 on a flat surface,
+	// about 1.41 on a right-angled edge. Kept within 3, where the faces fold back on
+	// each other.
+	float shell(const vec3 &p) const
+	{
+		const auto it = corners_.find(quantize(p));
+		if (it == corners_.end() || length2(it->second.sum) < 1e-20f)
+			return 1.0f;
+		const vec3 n = normalize(it->second.sum);
+		float sum = 0.0f;
+		float weight = 0.0f;
+		for (const Face &face : it->second.faces)
+		{
+			sum += face.angle / Math::max(dot(n, face.normal), 1.0f / 3.0f);
+			weight += face.angle;
+		}
+		return weight > 0.0f ? Math::clamp(sum / weight, 1.0f, 3.0f) : 1.0f;
+	}
+
+private:
+	struct Face
+	{
+		vec3 normal;
+		float angle;
+	};
+	struct Corner
+	{
+		vec3 sum{0.0f};
+		std::vector<Face> faces;
+	};
+	std::map<QuantizedPos, Corner> corners_;
+};
 
 //------------------------------------------------------------------------------
 // Texture loading.
@@ -794,7 +887,7 @@ std::vector<DecalSample> collectDecals(const Vec3 &origin, const vec3 &hiMin, co
 // world hit point, in render order. Mutates the three in place. Returns the
 // number of decals that actually contributed (for diagnostics).
 int applyDecals(const std::vector<DecalSample> &decals, const vec3 &worldHit, vec4 &albedo,
-	vec4 &shading, vec3 &worldN, bool flipNormalY, std::vector<std::atomic<long long>> *hits)
+	vec4 &shading, vec3 &worldN, std::vector<std::atomic<long long>> *hits)
 {
 	int applied = 0;
 	for (size_t di = 0; di < decals.size(); di++)
@@ -879,8 +972,9 @@ int applyDecals(const std::vector<DecalSample> &decals, const vec3 &worldHit, ve
 			float nx = nm.x * 2.0f - 1.0f;
 			float ny = nm.y * 2.0f - 1.0f;
 			// decal normal maps use the opposite green-channel convention here —
-			// flip Y so the relief is not inverted (toggled by the global setting)
-			if (flipNormalY == d.normalInvertG)
+			// flip Y so the relief is not inverted. Not by Invert G: that is of the map
+			// written (flipping here too would cancel it out).
+			if (!d.normalInvertG)
 				ny = -ny;
 			float nz = Math::sqrt(Math::max(1.0f - nx * nx - ny * ny, 0.0f));
 			// decal tangent frame: X/Y in the projection plane, Z out of the surface
@@ -1141,6 +1235,9 @@ Result bake(const std::vector<BakeGroup> &groups,
 		if (!lowMesh)
 			return fail("Cannot get the low-poly model geometry.");
 		mat4 lowTm = relativeTransform(low->getWorldTransform(), origin);
+		// A mirrored part (negative scale) has its triangles wound the other way: the
+		// face normals of the cage are flipped for it, or the cage would go inward.
+		const bool lowMirrored = mat3(lowTm).determinant() < 0.0f;
 		mat3 lowNm = transpose(inverse(mat3(lowTm)));
 
 		// this part's cage: its own override if it has one, else the global pair
@@ -1189,6 +1286,7 @@ Result bake(const std::vector<BakeGroup> &groups,
 				tr.group = int(gi);
 				tr.frontal = partCage.x;
 				tr.rear = partCage.y;
+				tr.mirrored = lowMirrored;
 				tgtTris.push_back(tr);
 			}
 		}
@@ -1197,34 +1295,20 @@ Result bake(const std::vector<BakeGroup> &groups,
 	if (tgtTris.empty())
 		return fail("The low-poly model has no triangles.");
 
-	// Smoothed cage normals: average area-weighted face normals over vertices
-	// merged by position, so rays don't split at hard edges and UV seams.
+	// Smoothed cage normals (see CageNormals).
 	{
-		std::map<QuantizedPos, vec3> smoothed;
-		auto add = [&smoothed](const vec3 &p, const vec3 &n) {
-			auto res = smoothed.insert({quantize(p), n});
-			if (!res.second)
-				res.first->second += n;
-		};
+		CageNormals smoothed;
 		for (const TargetTri &tr : tgtTris)
-		{
-			vec3 faceN = cross(tr.p1 - tr.p0, tr.p2 - tr.p0); // area-weighted
-			add(tr.p0, faceN);
-			add(tr.p1, faceN);
-			add(tr.p2, faceN);
-		}
+			tr.mirrored ? smoothed.addTriangle(tr.p0, tr.p2, tr.p1) : smoothed.addTriangle(tr.p0, tr.p1, tr.p2);
 		for (TargetTri &tr : tgtTris)
 		{
-			auto pick = [&smoothed](const vec3 &p, const vec3 &fallback) {
-				auto it = smoothed.find(quantize(p));
-				if (it == smoothed.end() || length2(it->second) < 1e-20f)
-					return fallback;
-				return normalize(it->second);
-			};
-			tr.r0 = pick(tr.p0, tr.n0);
-			tr.r1 = pick(tr.p1, tr.n1);
-			tr.r2 = pick(tr.p2, tr.n2);
-			vec3 fn = cross(tr.p1 - tr.p0, tr.p2 - tr.p0);
+			const vec3 fn = cross(tr.p1 - tr.p0, tr.p2 - tr.p0) * (tr.mirrored ? -1.0f : 1.0f);
+			tr.r0 = smoothed.at(tr.p0, tr.n0);
+			tr.r1 = smoothed.at(tr.p1, tr.n1);
+			tr.r2 = smoothed.at(tr.p2, tr.n2);
+			tr.s0 = smoothed.shell(tr.p0);
+			tr.s1 = smoothed.shell(tr.p1);
+			tr.s2 = smoothed.shell(tr.p2);
 			tr.faceN = length2(fn) > 1e-20f ? normalize(fn) : tr.n0;
 		}
 	}
@@ -1391,7 +1475,6 @@ Result bake(const std::vector<BakeGroup> &groups,
 			// cage of the low-poly part this triangle belongs to
 			const float frontal = tr.frontal;
 			const float rear = tr.rear;
-			const float rayLength = frontal + rear;
 
 			// UV triangle in pixel space
 			vec2 a = tr.uv0 * float(res);
@@ -1449,8 +1532,11 @@ Result bake(const std::vector<BakeGroup> &groups,
 						// trace from the cage surface inward along the smoothed normal and
 						// take the FIRST front-facing hit (the outermost high-poly detail),
 						// like conventional bakers do. Cage distance therefore controls how
-						// far above the low-poly surface details are still captured.
-						vec3 orig = pos + rayN * frontal;
+						// far above the low-poly surface details are still captured. On an
+						// edge the cage is further off the corner (CageNormals::shell).
+						const float lift = frontal * (tr.s0 * l0 + tr.s1 * l1 + tr.s2 * l2);
+						const float rayLength = lift + rear;
+						vec3 orig = pos + rayN * lift;
 						vec3 dir = -rayN;
 						auto scorer = [&](int tri, float t, float u, float v) -> float {
 							const SourceTri &str = srcTris[tri];
@@ -1488,7 +1574,7 @@ Result bake(const std::vector<BakeGroup> &groups,
 								locBackface++;
 								debugColor = vec4(1.0f, 0.0f, 0.0f, 1.0f); // red
 							}
-							else if (hitT <= frontal)
+							else if (hitT <= lift)
 							{
 								locFront++;
 								debugColor = vec4(0.0f, 1.0f, 0.0f, 1.0f); // green
@@ -1511,7 +1597,7 @@ Result bake(const std::vector<BakeGroup> &groups,
 						// the map usable for compositing elsewhere.
 						vec4 emission(0.0f, 0.0f, 0.0f, 0.0f);
 						if (surf.emissionOn)
-							emission = vec4(surf.emissionColor.xyz * surf.emissionScale, 1.0f);
+							emission = vec4(srgbToLinear(surf.emissionColor.xyz) * surf.emissionScale, 1.0f);
 						vec3 worldN = srcN;
 						// diagnostics: did this sample read the GPU capture?
 						bool sampledGpu = false;
@@ -1595,7 +1681,7 @@ Result bake(const std::vector<BakeGroup> &groups,
 									vec4 e4 = surf.gpu.emission->toVec4(surf.gpu.emission->get2D(cuv));
 									// the capture exists for every surface, so the
 									// material's emission state decides the mask
-									emission = vec4(e4.xyz, surf.emissionOn ? 1.0f : 0.0f);
+									emission = vec4(srgbToLinear(e4.xyz), surf.emissionOn ? 1.0f : 0.0f);
 								}
 
 								vec3 ts = BakeGpu::unpackGBufferNormal(n4);
@@ -1625,7 +1711,7 @@ Result bake(const std::vector<BakeGroup> &groups,
 								if (surf.emissionOn && surf.emission)
 								{
 									vec4 e4 = surf.emission->toVec4(surf.emission->get2D(suv));
-									emission = vec4(e4.xyz * surf.emissionColor.xyz * surf.emissionScale, 1.0f);
+									emission = vec4(srgbToLinear(e4.xyz * surf.emissionColor.xyz) * surf.emissionScale, 1.0f);
 								}
 
 								if (surf.normal)
@@ -1635,8 +1721,8 @@ Result bake(const std::vector<BakeGroup> &groups,
 									vec4 nm = surf.normal->toVec4(surf.normal->get2D(suv));
 									float nx = nm.x * 2.0f - 1.0f;
 									float ny = nm.y * 2.0f - 1.0f;
-									if (settings.flipNormalY)
-										ny = -ny;
+									// Invert G is of the map written, not of the maps read:
+									// flipping here too would cancel it out.
 									if (surf.normalInvertG)
 										ny = -ny; // renderer sees the imported (G-inverted) copy
 									float nz = Math::sqrt(Math::max(1.0f - nx * nx - ny * ny, 0.0f));
@@ -1661,8 +1747,7 @@ Result bake(const std::vector<BakeGroup> &groups,
 						if (!decals.empty() && !settings.debugZones)
 						{
 							vec3 worldHit = st.p0 + st.e1 * hitU + st.e2 * hitV;
-							if (applyDecals(decals, worldHit, albedo, shading, worldN,
-									settings.flipNormalY, &decalHits)
+							if (applyDecals(decals, worldHit, albedo, shading, worldN, &decalHits)
 								> 0)
 								locDecal++;
 						}
@@ -1956,6 +2041,32 @@ Result bake(const std::vector<BakeGroup> &groups,
 	Log::message("Baker: data path \"%s\"\n", dataPath.get());
 	Log::message("Baker: output dir \"%s\"\n", absDir.get());
 
+	// The maps are written over whatever has their names: never over a texture the
+	// high-poly itself uses (its own statue_n.png next to it, when the name is "statue").
+	{
+		std::set<std::string> highTextures;
+		for (const BakeGroup &g : groups)
+			for (const Ptr<ObjectMeshStatic> &high : g.highs)
+				for (int s = 0; high && s < high->getNumSurfaces(); s++)
+				{
+					const MaterialPtr m = high->getMaterial(s);
+					for (int t = 0; m && t < m->getNumTextures(); t++)
+					{
+						const String path = resolveAssetPath(m->getTexturePath(t));
+						if (!path.empty())
+							highTextures.insert(path.get());
+					}
+				}
+		const std::pair<bool, const char *> outputs[] = {{settings.bakeAlbedo, "_alb"}, {settings.bakeShading, "_sh"},
+			{settings.bakeNormal, "_n"}, {settings.bakeEmission, "_e"}};
+		for (const auto &output : outputs)
+		{
+			const String target = virtualDir + baseName + output.second + ".png";
+			if (output.first && highTextures.count(target.get()))
+				return fail("A baked map would overwrite a texture of the high-poly: give the bake another name.");
+		}
+	}
+
 	//--------------------------------------------------------------------------
 	// Write images.
 	//--------------------------------------------------------------------------
@@ -2022,6 +2133,17 @@ Result bake(const std::vector<BakeGroup> &groups,
 	}
 	if (settings.bakeEmission)
 	{
+		// The emission is linear here. An 8-bit map holds up to 1: an emission brighter than
+		// that (a scale of 5) is written divided by its brightest value - linear, so that the
+		// material multiplying it back gives every texel its brightness - then encoded.
+		float brightest = 0.0f;
+		for (size_t i = 0; i + 3 < accEmission.size(); i += 4)
+			brightest = Math::max(brightest, Math::max(accEmission[i], Math::max(accEmission[i + 1], accEmission[i + 2])));
+		const float divide = brightest > 1.0f ? brightest : 1.0f;
+		result.emissionScale = divide;
+		for (size_t i = 0; i + 3 < accEmission.size(); i += 4)
+			for (int c = 0; c < 3; c++)
+				accEmission[i + c] = linearToSrgb(Math::clamp(accEmission[i + c] / divide, 0.0f, 1.0f));
 		if (!writeImage("_e", 4, accEmission, 4, result.emissionPath))
 			return fail("Failed to save the emission texture (_e).");
 	}
@@ -2090,7 +2212,21 @@ void assignMaterial(const std::vector<BakeGroup> &groups, Result &result)
 		baseName = baseName.substr(0, baseName.size() - int(suffixLen));
 
 	MaterialPtr mat = firstLow->getMaterial(0);
-	if (!mat || mat->isBase())
+	// A material the high-poly uses too (one imported material for both, a mesh baked onto
+	// itself) is not baked into: the high-poly would show the baked maps, and a re-bake
+	// would read its own output. The low-poly gets a material of its own then.
+	bool sharedWithHigh = false;
+	if (mat && !mat->isBase())
+	{
+		for (const BakeGroup &g : groups)
+			for (const Ptr<ObjectMeshStatic> &high : g.highs)
+				for (int s = 0; high && s < high->getNumSurfaces() && !sharedWithHigh; s++)
+				{
+					const MaterialPtr hm = high->getMaterial(s);
+					sharedWithHigh = hm && hm->getGUID() == mat->getGUID();
+				}
+	}
+	if (!mat || mat->isBase() || sharedWithHigh)
 	{
 		MaterialPtr base;
 		if (mat && mat->isBase())
@@ -2105,10 +2241,20 @@ void assignMaterial(const std::vector<BakeGroup> &groups, Result &result)
 			return;
 		}
 
-		mat = base->inherit();
 		String matPath = virtualDir + baseName + "_baked.mat";
-		if (!mat->createMaterialFile(matPath.get()))
-			Log::warning("Baker: failed to create material file \"%s\"\n", matPath.get());
+		// A material of a previous bake under this name is used again: a second material
+		// with the file of the first could not be registered, and would overwrite it.
+		MaterialPtr existing = Materials::findMaterialByPath(matPath.get());
+		if (!existing && FileSystem::isFileExist(matPath.get()))
+			existing = Materials::loadMaterial(matPath.get());
+		if (existing && !existing->isBase())
+			mat = existing;
+		else
+		{
+			mat = base->inherit();
+			if (!mat->createMaterialFile(matPath.get()))
+				Log::warning("Baker: failed to create material file \"%s\"\n", matPath.get());
+		}
 		for (const BakeGroup &g : groups)
 			for (const Ptr<ObjectMeshStatic> &low : g.lows)
 				low->setMaterial(mat, "*");
@@ -2126,9 +2272,29 @@ void assignMaterial(const std::vector<BakeGroup> &groups, Result &result)
 	}
 
 	// The maps are baked to the UV0 of the low-poly as it is: the tiling and the offset
-	// the material had would repeat or shift them.
+	// the material had would repeat or shift them. But it is one for all the maps of the
+	// material: while a map that stays is not one of a bake (the low-poly's own tiled
+	// texture, when only some maps are baked), it keeps its tiling - and the new maps are
+	// off; the caller tells it (uvTransformKept).
+	const auto baked_or_none = [&](const char *slot, const String &baked, const char *suffix) {
+		if (!baked.empty() || mat->findTexture(slot) < 0)
+			return true;
+		const String current = resolveAssetPath(mat->getTexturePath(slot));
+		if (current.empty() || !strncmp(current.get(), "core/", 5))
+			return true; // the default texture of the base material: nothing to tile
+		const String name = pathBaseName(current);
+		const String bakedName = baseName + suffix;
+		return name == bakedName;
+	};
 	if (mat->findParameter("uv_transform") >= 0)
-		mat->setParameterFloat4("uv_transform", vec4(1.0f, 1.0f, 0.0f, 0.0f));
+	{
+		const vec4 identity(1.0f, 1.0f, 0.0f, 0.0f);
+		if (baked_or_none("albedo", result.albedoPath, "_alb") && baked_or_none("shading", result.shadingPath, "_sh")
+			&& baked_or_none("normal", result.normalPath, "_n"))
+			mat->setParameterFloat4("uv_transform", identity);
+		else if (mat->getParameterFloat4("uv_transform") != identity)
+			result.uvTransformKept = true;
+	}
 	if (!result.albedoPath.empty() && mat->findTexture("albedo") >= 0)
 	{
 		mat->setTexturePath("albedo", result.albedoPath.get());
@@ -2151,14 +2317,15 @@ void assignMaterial(const std::vector<BakeGroup> &groups, Result &result)
 		mat->setTexturePath("normal", result.normalPath.get());
 	if (!result.emissionPath.empty() && mat->findState("emission") >= 0)
 	{
-		// the baked texture stores the final emission color: neutralize the multipliers
+		// the baked texture stores the final emission color (divided by emissionScale when
+		// brighter than a map holds): the color neutral, the scale brings the brightness back
 		mat->setState("emission", 1);
 		if (mat->findTexture("emission") >= 0)
 			mat->setTexturePath("emission", result.emissionPath.get());
 		if (mat->findParameter("emission_color") >= 0)
 			mat->setParameterFloat4("emission_color", vec4(1.0f, 1.0f, 1.0f, 1.0f));
 		if (mat->findParameter("emission_scale") >= 0)
-			mat->setParameterFloat("emission_scale", 1.0f);
+			mat->setParameterFloat("emission_scale", result.emissionScale);
 	}
 	mat->save();
 	Log::message("Baker: material \"%s\" updated\n", result.materialPath.get());
@@ -2199,6 +2366,66 @@ String suggestBaseName(const Ptr<ObjectMeshStatic> &high)
 	if (baseName.empty())
 		baseName = "baked";
 	return baseName;
+}
+
+CageShell buildCageShell(const std::vector<Ptr<ObjectMeshStatic>> &lows)
+{
+	CageShell cage;
+	cage.origin = !lows.empty() && lows[0] ? lows[0]->getWorldPosition() : Vec3_zero;
+	for (const Ptr<ObjectMeshStatic> &low : lows)
+	{
+		if (!low)
+			continue;
+		Ptr<ConstMesh> mesh = low->getMeshForceRAM();
+		if (!mesh)
+			continue;
+		const mat4 tm = relativeTransform(low->getWorldTransform(), cage.origin);
+		// a mirrored part (negative scale): its triangles wound back the usual way, as the
+		// bake does (TargetTri::mirrored)
+		const bool mirrored = mat3(tm).determinant() < 0.0f;
+		for (int s = 0; s < mesh->getNumSurfaces(); s++)
+		{
+			if (!isSurfaceBakeable(low, s))
+				continue;
+			const Vector<int> &cind = mesh->getCIndices(s);
+			for (int k = 0; k + 2 < cind.size(); k += 3)
+			{
+				for (int v = 0; v < 3; v++)
+					cage.points.push_back(tm * mesh->getVertex(cind[k + (mirrored && v > 0 ? 3 - v : v)], s));
+				cage.part.push_back(low->getID());
+			}
+		}
+	}
+
+	// The cage of the bake.
+	CageNormals smoothed;
+	for (size_t i = 0; i + 2 < cage.points.size(); i += 3)
+		smoothed.addTriangle(cage.points[i], cage.points[i + 1], cage.points[i + 2]);
+	std::set<std::pair<QuantizedPos, QuantizedPos>> edges;
+	for (size_t i = 0; i + 2 < cage.points.size(); i += 3)
+	{
+		const vec3 faceN = cross(cage.points[i + 1] - cage.points[i], cage.points[i + 2] - cage.points[i]);
+		const vec3 fallback = length2(faceN) > 1e-20f ? normalize(faceN) : vec3(0.0f, 0.0f, 1.0f);
+		for (int k = 0; k < 3; k++)
+		{
+			const vec3 &p = cage.points[i + k];
+			cage.normals.push_back(smoothed.at(p, fallback));
+			cage.shell.push_back(smoothed.shell(p));
+			// each edge once: by its ends merged by position
+			const int from = int(i) + k;
+			const int to = int(i) + (k + 1) % 3;
+			QuantizedPos a = quantize(cage.points[from]);
+			QuantizedPos b = quantize(cage.points[to]);
+			if (b < a)
+				std::swap(a, b);
+			if (edges.insert({a, b}).second)
+			{
+				cage.edges.push_back(from);
+				cage.edges.push_back(to);
+			}
+		}
+	}
+	return cage;
 }
 
 bool isSurfaceBakeable(const Ptr<ObjectMeshStatic> &obj, int surface)
@@ -2296,6 +2523,9 @@ std::map<int, vec2> suggestPartCage(const std::vector<BakeGroup> &groups,
 			std::vector<float> above, below;
 			for (int s = 0; s < lm->getNumSurfaces(); s++)
 			{
+				// as the bake: a disabled surface, a hidden one, a far LOD is not baked
+				if (!isSurfaceBakeable(low, s))
+					continue;
 				const Vector<int> &cind = lm->getCIndices(s);
 				const Vector<int> &tind = lm->getTIndices(s);
 				if (cind.size() != tind.size())

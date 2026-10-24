@@ -708,18 +708,21 @@ PendingCapturePtr requestSurfaceCapture(const Ptr<ObjectMeshStatic> &obj, const 
 	flatNode->setWorldTransform(Mat4(translate(vec3(0.0f, 0.0f, quadZ))));
 	flatNode->setMaterial(obj->getMaterial(surface), 0);
 
-	// plain black material for the background quad (tiny runtime-only child
-	// material; a handful leak per bake — negligible)
-	MaterialPtr bgBase = Materials::findManualMaterial("mesh_base");
-	if (!bgBase)
-		bgBase = Materials::findManualMaterial("Unigine::mesh_base");
-	if (bgBase)
+	// plain black material for the background quad: one runtime-only child material,
+	// made once and used by every capture (a new one per capture is never freed - a
+	// material pointer does not own it)
+	static MaterialPtr bgMat;
+	if (!bgMat || bgMat.isDeleted())
 	{
-		MaterialPtr bgMat = bgBase->inherit();
-		if (bgMat->findParameter("albedo_color") >= 0)
+		MaterialPtr bgBase = Materials::findManualMaterial("mesh_base");
+		if (!bgBase)
+			bgBase = Materials::findManualMaterial("Unigine::mesh_base");
+		bgMat = bgBase ? bgBase->inherit() : MaterialPtr();
+		if (bgMat && bgMat->findParameter("albedo_color") >= 0)
 			bgMat->setParameterFloat4("albedo_color", vec4(0.0f, 0.0f, 0.0f, 1.0f));
-		flatNode->setMaterial(bgMat, 1);
 	}
+	if (bgMat)
+		flatNode->setMaterial(bgMat, 1);
 
 	//--------------------------------------------------------------------------
 	// Orthographic camera looking straight at the quad (identity rotation, so

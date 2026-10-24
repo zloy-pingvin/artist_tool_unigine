@@ -285,7 +285,6 @@ private:
 	mutable QString shown_signature_;
 
 	Unigine::EventConnections connections_;
-	Unigine::Visualizer::MODE saved_visualizer_mode_{Unigine::Visualizer::MODE_DISABLED};
 };
 
 } // namespace ArtistTool

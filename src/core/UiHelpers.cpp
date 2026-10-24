@@ -5,6 +5,10 @@
 #include <UnigineImage.h>
 
 #include <QAbstractSpinBox>
+#include <QChildEvent>
+#include <QStyle>
+#include <QFrame>
+#include <QAbstractScrollArea>
 #include <QApplication>
 #include <QDialog>
 #include <QLineEdit>
@@ -14,6 +18,7 @@
 #include <QCryptographicHash>
 #include <QDial>
 #include <QDir>
+#include <QGroupBox>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
@@ -27,6 +32,8 @@
 #include <QPixmap>
 #include <QSettings>
 #include <QStringList>
+#include <UnigineVisualizer.h>
+
 #include <QToolButton>
 #include <QWidget>
 
@@ -75,6 +82,8 @@ protected:
 				dragged_ = false;
 				steps_done_ = 0;
 				press_position_ = mouse->globalPosition();
+				// The upper arrow or the lower one, as the box itself tells them apart.
+				press_down_ = mouse->position().y() >= box_->height() / 2.0;
 				box_->setFocus(Qt::MouseFocusReason);
 				return true;
 			}
@@ -106,9 +115,9 @@ protected:
 					return false;
 
 				pressed_ = false;
-				// A click without a drag does what it did before: one step up.
+				// A click without a drag does what the arrow does: a step up or down.
 				if (!dragged_)
-					box_->stepBy(1);
+					box_->stepBy(press_down_ ? -1 : 1);
 				return true;
 			}
 
@@ -122,6 +131,7 @@ private:
 	QAbstractSpinBox *box_{nullptr};
 	bool pressed_{false};
 	bool dragged_{false};
+	bool press_down_{false};
 	int steps_done_{0};
 	QPointF press_position_;
 };
@@ -497,6 +507,30 @@ QString filled_button_style(const char *color, const char *hover, const char *pr
 
 } // namespace
 
+namespace
+{
+int visualizer_requests = 0;
+bool visualizer_turned_on = false;
+} // namespace
+
+void requestVisualizer()
+{
+	if (visualizer_requests++ > 0)
+		return;
+	visualizer_turned_on = Unigine::Visualizer::getMode() == Unigine::Visualizer::MODE_DISABLED;
+	if (visualizer_turned_on)
+		Unigine::Visualizer::setMode(Unigine::Visualizer::MODE_ENABLED_DEPTH_TEST_ENABLED);
+}
+
+void releaseVisualizer()
+{
+	if (visualizer_requests <= 0 || --visualizer_requests > 0)
+		return;
+	if (visualizer_turned_on && Unigine::Visualizer::getMode() == Unigine::Visualizer::MODE_ENABLED_DEPTH_TEST_ENABLED)
+		Unigine::Visualizer::setMode(Unigine::Visualizer::MODE_DISABLED);
+	visualizer_turned_on = false;
+}
+
 QString goButtonStyle()
 {
 	return filled_button_style("#3f9a4a", "#4bad57", "#358540");
@@ -505,6 +539,107 @@ QString goButtonStyle()
 QString attentionButtonStyle()
 {
 	return filled_button_style("#2f6fd6", "#3d7fe8", "#285fb8");
+}
+
+QString handWorkButtonStyle()
+{
+	return filled_button_style("#c56a1c", "#d87b2a", "#a95a15");
+}
+
+namespace
+{
+
+const char TINTED_FRAME_NAME[] = "artist_tool_tinted_frame";
+// The plain containers of the rows inside a tinted frame.
+const char CLEAR_CONTAINER_NAME[] = "artist_tool_clear";
+
+// A widget that only holds others (a row, a cell): a QWidget or a QFrame itself, not the
+// viewport of a list or a text field (they keep their background).
+bool is_plain_container(const QWidget *widget)
+{
+	const QMetaObject *type = widget->metaObject();
+	return (type == &QWidget::staticMetaObject || type == &QFrame::staticMetaObject)
+		&& !qobject_cast<const QAbstractScrollArea *>(widget->parentWidget());
+}
+
+// Names the plain containers inside a tinted frame, also the ones added to it later (the
+// rows of a list made anew): the style sheet of the frame makes them see-through.
+class ContainerNamer final : public QObject
+{
+public:
+	using QObject::QObject;
+
+	void watch(QWidget *widget)
+	{
+		widget->installEventFilter(this);
+		if (widget->objectName().isEmpty() && is_plain_container(widget))
+			widget->setObjectName(QString::fromUtf8(CLEAR_CONTAINER_NAME));
+	}
+
+protected:
+	bool eventFilter(QObject *watched, QEvent *event) override
+	{
+		// After it is made and polished: its class is known then. Polished with the old
+		// name, it is polished again.
+		// The widgets inside it were polished before it, unwatched: they are named too.
+		if (event->type() == QEvent::ChildPolished)
+		{
+			if (QWidget *child = qobject_cast<QWidget *>(static_cast<QChildEvent *>(event)->child()))
+			{
+				adopt(child);
+				for (QWidget *inner : child->findChildren<QWidget *>())
+					adopt(inner);
+			}
+		}
+		return QObject::eventFilter(watched, event);
+	}
+
+private:
+	void adopt(QWidget *widget)
+	{
+		const bool rename = widget->objectName().isEmpty() && is_plain_container(widget);
+		watch(widget);
+		if (rename)
+		{
+			widget->style()->unpolish(widget);
+			widget->style()->polish(widget);
+			widget->update();
+		}
+	}
+};
+
+} // namespace
+
+void makeTintedFrame(QWidget *frame)
+{
+	// The style of the editor gives every widget the gray of the panel (a palette is
+	// overridden by it), so the frame gets its gray by a style sheet. What inside it would
+	// paint the panel gray over it - the containers of the rows, labels, check and radio
+	// buttons, dials - is see-through. A frame inside it keeps the panel gray (the user
+	// wants it so), as do fields, lists and buttons.
+	frame->setObjectName(QString::fromUtf8(TINTED_FRAME_NAME));
+	ContainerNamer *namer = new ContainerNamer(frame);
+	for (QWidget *widget : frame->findChildren<QWidget *>())
+		namer->watch(widget);
+	namer->watch(frame);
+
+	QStringList inside;
+	for (const char *type : {"#artist_tool_clear", "QLabel", "QCheckBox", "QRadioButton", "QDial"})
+		inside << QString::fromUtf8("#%1 %2").arg(QString::fromUtf8(TINTED_FRAME_NAME), QString::fromUtf8(type));
+	frame->setStyleSheet(QString::fromUtf8("#%1 { background-color: rgba(0, 0, 0, 28); } %2 { background-color: transparent; }")
+		.arg(QString::fromUtf8(TINTED_FRAME_NAME), inside.join(QString::fromUtf8(", "))));
+}
+
+void tintPageFrames(QWidget *page)
+{
+	for (QGroupBox *box : page->findChildren<QGroupBox *>())
+	{
+		bool nested = false;
+		for (QWidget *parent = box->parentWidget(); parent && parent != page; parent = parent->parentWidget())
+			nested = nested || qobject_cast<QGroupBox *>(parent);
+		if (!nested)
+			makeTintedFrame(box);
+	}
 }
 
 QButtonGroup *makeAxisButtons(QHBoxLayout *layout, QObject *parent, const QString &tooltip)

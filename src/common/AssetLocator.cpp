@@ -1,6 +1,7 @@
 #include "AssetLocator.h"
 #include "Localization.h"
 #include "PlaceableAsset.h"
+#include "ViewportPicking.h"
 
 #include <editor/UnigineAssetManager.h>
 #include <editor/UnigineSelection.h>
@@ -9,12 +10,14 @@
 
 #include <UnigineFileSystem.h>
 #include <UnigineInput.h>
+#include <UnigineLog.h>
 #include <UnigineNodes.h>
 #include <UnigineObjects.h>
 
 #include <QApplication>
 #include <QEvent>
 #include <QMenu>
+#include <QMouseEvent>
 
 #include <cstring>
 
@@ -148,14 +151,32 @@ bool AssetLocator::showSelectedAsset()
 
 bool AssetLocator::eventFilter(QObject *watched, QEvent *event)
 {
+	// A right press, where it was. In a viewport it is delivered to the window of the
+	// engine inside it, not to a widget: where it was is looked up when the menu comes.
+	if (event->type() == QEvent::MouseButtonPress && static_cast<QMouseEvent *>(event)->button() == Qt::RightButton)
+	{
+		const QMouseEvent *mouse = static_cast<QMouseEvent *>(event);
+		if (mouse->timestamp() != last_right_press_)
+		{
+			last_right_press_ = mouse->timestamp();
+			right_press_position_ = mouse->globalPosition().toPoint();
+			right_press_time_.start();
+		}
+	}
 	if (event->type() == QEvent::Show && watched->isWidgetType()
 		&& strcmp(watched->metaObject()->className(), EDITOR_MENU_CLASS) == 0)
 	{
 		QMenu *menu = static_cast<QMenu *>(watched);
-		// A menu of its own (the context menu of nodes), opened with nodes selected,
-		// and not one that already has the item.
-		if (!menu->parentWidget() && !menu->property(MENU_ITEM_PROPERTY).toBool() && assetOfSelection().isValid())
+		// A menu of its own (the context menu of nodes) a right click in a viewport has
+		// just opened, with nodes selected, and not one that already has the item. Just: a
+		// menu opened from the keyboard later is not one of a click.
+		const bool recent = right_press_time_.isValid() && right_press_time_.elapsed() < 1500;
+		QWidget *under = recent ? QApplication::widgetAt(right_press_position_) : nullptr;
+		const bool from_viewport = under && findViewportWidget(under);
+		if (from_viewport && !menu->parentWidget() && !menu->property(MENU_ITEM_PROPERTY).toBool()
+			&& assetOfSelection().isValid())
 			add_menu_item(menu);
+		right_press_time_.invalidate();
 	}
 	return false;
 }

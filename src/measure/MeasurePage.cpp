@@ -2,6 +2,7 @@
 #include "SurfaceFilterButton.h"
 #include "UiHelpers.h"
 
+#include <QTimer>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QClipboard>
@@ -135,10 +136,16 @@ void MeasurePage::showEvent(QShowEvent *event)
 
 void MeasurePage::hideEvent(QHideEvent *event)
 {
-	measuring_on_show_ = false;
-	tool_->setMeasuring(false);
-	tool_->setActive(false);
 	QWidget::hideEvent(event);
+	// Docking or undocking the window hides it for a moment: only a page that stays
+	// hidden stops measuring (the measurement being put is not lost to a dock).
+	QTimer::singleShot(0, this, [this]() {
+		if (isVisible())
+			return;
+		measuring_on_show_ = false;
+		tool_->setMeasuring(false);
+		tool_->setActive(false);
+	});
 }
 
 

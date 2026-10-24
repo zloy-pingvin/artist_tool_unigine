@@ -272,6 +272,8 @@ private:
 
 	bool active_{false};
 	bool live_update_{true};
+	// The next rearrange of Live Update is a step of the undo history (it was turned on).
+	bool rearrange_undoable_{false};
 	// The current path has just been made by createPath(): if adding points to it ends
 	// with no points, it is removed.
 	bool discard_if_empty_{false};
@@ -288,7 +290,6 @@ private:
 	int unplaced_{0};
 
 	Unigine::EventConnections connections_;
-	Unigine::Visualizer::MODE saved_visualizer_mode_{Unigine::Visualizer::MODE_DISABLED};
 };
 
 } // namespace ArtistTool

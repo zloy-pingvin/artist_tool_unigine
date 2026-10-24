@@ -139,6 +139,8 @@ private:
 		float saved_visible_distance{0.0f};
 		// What the bake set on the clutter.
 		int bake_spawn_rate{1};
+		// The frames the cells are spawned over.
+		int spawn_frames{30};
 		float bake_visible_distance{0.0f};
 		Unigine::WorldClutterPtr clutter;
 		Unigine::HashSet<int> stale_ids;

@@ -224,9 +224,7 @@ void PathPlacer::setActive(bool active)
 	{
 		CurveEditor::recoverManipulators();
 		// The curve is drawn with the Visualizer, once per frame.
-		saved_visualizer_mode_ = Visualizer::getMode();
-		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
-			Visualizer::setMode(Visualizer::MODE_ENABLED_DEPTH_TEST_ENABLED);
+		requestVisualizer();
 		Engine::get()->getEventEndWorldUpdate().connect(connections_, this, &PathPlacer::update);
 		// Clicks on the points of the path are taken all the time the tool is active.
 		qApp->installEventFilter(this);
@@ -237,8 +235,7 @@ void PathPlacer::setActive(bool active)
 		editor_.reset();
 		qApp->removeEventFilter(this);
 		connections_.disconnectAll();
-		if (saved_visualizer_mode_ == Visualizer::MODE_DISABLED)
-			Visualizer::setMode(Visualizer::MODE_DISABLED);
+		releaseVisualizer();
 	}
 }
 
@@ -270,6 +267,11 @@ void PathPlacer::set_path(const NodePtr &root)
 	unplaced_ = 0;
 	load_settings();
 	editor_.setClosed(settings_.closed);
+	// A path without settings yet (of the old script): they are written down now, not as a
+	// step of the undo history - an undo of the first change goes back to them, not to
+	// nothing (which would keep the change).
+	if (saved_settings_.isEmpty())
+		save_settings(false);
 
 	// The objects are not touched when a path is merely picked up: they are
 	// rearranged when something of the path changes.
@@ -616,9 +618,13 @@ void PathPlacer::setLiveUpdate(bool live)
 		return;
 
 	live_update_ = live;
-	// Turning it on puts the objects back on the path at the next frame.
+	// Turning it on puts the objects back on the path at the next frame, as a step of
+	// the undo history (they may have been set by hand meanwhile).
 	if (live_update_)
+	{
 		arranged_state_.clear();
+		rearrange_undoable_ = true;
+	}
 	notify_changed();
 }
 
@@ -640,6 +646,8 @@ void PathPlacer::load_settings()
 			if (step >= MIN_OBJECT_LENGTH)
 				settings_.step = step;
 		}
+		// The assets are of the path: not those of the path picked before.
+		pattern_.clear();
 		return;
 	}
 
@@ -1105,8 +1113,10 @@ void PathPlacer::update()
 		return;
 
 	if (live_update_)
-		rearrange();
-	else
+	{
+		rearrange(rearrange_undoable_);
+		rearrange_undoable_ = false;
+	} else
 	{
 		// Only the numbers shown on the page are refreshed.
 		length_ = curve.length;

@@ -29,7 +29,6 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QRandomGenerator>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -118,9 +117,8 @@ WireBuilderPage::WireBuilderPage(QWidget *parent)
 	layout->addWidget(build_line_group());
 	layout->addWidget(build_poles_group());
 	layout->addWidget(build_sag_group());
+	// Texture and Result are inside it.
 	layout->addWidget(build_shape_group());
-	layout->addWidget(build_texture_group());
-	layout->addWidget(build_output_group());
 
 	// What is drawn over the wires, as in the Road.
 	const QString view_tooltip = loc_.tip(
@@ -209,6 +207,8 @@ WireBuilderPage::WireBuilderPage(QWidget *parent)
 		QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
 		settings.beginGroup(SETTINGS_GROUP);
 		hotkeys_header_->setChecked(settings.value("hotkeys_expanded", true).toBool());
+		sag_advanced_header_->setChecked(settings.value("sag_advanced_expanded", false).toBool());
+		shape_advanced_header_->setChecked(settings.value("shape_advanced_expanded", false).toBool());
 		const int view = view_->findData(settings.value("view", int(WIRE_VIEW_SEGMENTS)).toInt());
 		view_->setCurrentIndex(view >= 0 ? view : 0);
 		builder_->setView(WireView(view_->currentData().toInt()));
@@ -236,6 +236,8 @@ WireBuilderPage::~WireBuilderPage()
 	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
 	settings.beginGroup(SETTINGS_GROUP);
 	settings.setValue("hotkeys_expanded", hotkeys_header_->isChecked());
+	settings.setValue("sag_advanced_expanded", sag_advanced_header_->isChecked());
+	settings.setValue("shape_advanced_expanded", shape_advanced_header_->isChecked());
 	settings.setValue("view", view_->currentData().toInt());
 }
 
@@ -249,6 +251,8 @@ void WireBuilderPage::resetSettings()
 	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
 	settings.remove(QString::fromUtf8(SETTINGS_GROUP));
 	hotkeys_header_->setChecked(true);
+	sag_advanced_header_->setChecked(false);
+	shape_advanced_header_->setChecked(false);
 	view_->setCurrentIndex(0);
 }
 
@@ -567,42 +571,6 @@ QWidget *WireBuilderPage::build_line_group()
 	pole_row->addStretch(1);
 	layout->addWidget(link_row_);
 
-	// The attach points and Closed.
-	const QString attach_tooltip = loc_.tip(
-		"The name of the attach points inside the poles, before their number: with \"wire\" the "
-		"points are the nodes named wire_1, wire_2... (also wire1, Wire.01). Put dummies of such "
-		"names into the asset of the pole where the wires are fixed - on its insulators.\n"
-		"The wire of number N goes from the point N of one pole to the point N of the next one. "
-		"A pole with no such points is one point itself: all the wires go to it.\n"
-		"The points are shown in the viewport as yellow dots.",
-		"Имя точек крепления внутри столбов, перед номером: при «wire» точки - это ноды с "
-		"именами wire_1, wire_2... (а также wire1, Wire.01). Поставьте пустышки (dummy) с такими "
-		"именами в ассет столба там, где крепятся провода, - на изоляторах.\n"
-		"Провод номер N идёт от точки N одного столба к точке N следующего. Столб без таких "
-		"точек - сам одна точка: к нему приходят все провода.\n"
-		"Во вьюпорте точки показаны жёлтыми точками.");
-	QHBoxLayout *attach_row = new QHBoxLayout;
-	attach_row->setSpacing(3);
-	QLabel *attach_label = new QLabel(uiText("Attach Points", "Точки крепления"));
-	attach_label->setToolTip(attach_tooltip);
-	attach_row->addWidget(attach_label);
-	attach_row->addSpacing(6);
-	attach_name_ = new QLineEdit;
-	attach_name_->setToolTip(attach_tooltip);
-	attach_name_->setMaximumWidth(120);
-	attach_row->addWidget(attach_name_);
-	QLabel *attach_suffix = new QLabel(QString::fromUtf8("_1, _2..."));
-	attach_suffix->setEnabled(false);
-	attach_row->addWidget(attach_suffix);
-	QToolButton *attach_reset = makeResetButton(loc_.tip("Reset to default", "Сбросить на значение по умолчанию"), this, [this]() {
-		attach_name_->setText(WireSettings().attach_name);
-		apply_settings();
-	});
-	attach_row->addWidget(attach_reset);
-	attach_widgets_ << attach_label << attach_name_ << attach_suffix << attach_reset;
-	attach_row->addStretch(1);
-	layout->addLayout(attach_row);
-
 	// Closed, and all the settings of the line back to their defaults, as in the Road.
 	QHBoxLayout *closed_row = new QHBoxLayout;
 	closed_ = new QCheckBox(uiText("Closed", "Замкнутая"));
@@ -616,10 +584,10 @@ QWidget *WireBuilderPage::build_line_group()
 	reset_settings_button_->setIcon(makeResetIcon());
 	reset_settings_button_->setIconSize(BUTTON_ICON_SIZE);
 	reset_settings_button_->setToolTip(loc_.tip(
-		"Put the settings of the current line back to their defaults. What its wires and poles are "
-		"made of, its attach points, its folder and Closed stay.",
-		"Вернуть настройки текущей линии к значениям по умолчанию. Из чего сделаны провода и "
-		"столбы, точки крепления, папка и [[Closed|«Замкнутая»]] остаются."));
+		"Put all the settings of the current line back to their defaults, as a new line has them "
+		"(the wire, the poles and the attach points too). Only its folder and Closed stay.",
+		"Вернуть все настройки текущей линии к значениям по умолчанию, как у новой линии (провод, "
+		"столбы и точки крепления тоже). Остаются только папка и [[Closed|«Замкнутая»]]."));
 	closed_row->addWidget(reset_settings_button_);
 	closed_row->addWidget(makeResetButton(loc_.tip("Reset to default", "Сбросить на значение по умолчанию"), this,
 		[this]() { closed_->setChecked(WireSettings().closed); }));
@@ -635,7 +603,6 @@ QWidget *WireBuilderPage::build_line_group()
 		message_.clear();
 		builder_->resetSettings();
 	});
-	connect(attach_name_, &QLineEdit::editingFinished, this, [this]() { apply_settings(); });
 	connect(closed_, &QCheckBox::toggled, this, [this](bool) { apply_settings(); });
 
 	// The lines of the world.
@@ -804,6 +771,7 @@ QWidget *WireBuilderPage::build_poles_group()
 	pole_list_->setVerticalSpacing(2);
 	pole_list_->setColumnStretch(0, 1);
 	layout->addWidget(list_widget);
+	curve_pole_widgets_ << list_widget;
 
 	QHBoxLayout *buttons = new QHBoxLayout;
 	QPushButton *add_button = new QPushButton(uiText("Add Selected Assets", "Добавить выбранные ассеты"));
@@ -830,6 +798,7 @@ QWidget *WireBuilderPage::build_poles_group()
 		"Убрать все ассеты из списка; столбы тоже убираются."));
 	buttons->addWidget(pole_clear_button_);
 	layout->addLayout(buttons);
+	curve_pole_widgets_ << add_button << pole_clear_button_;
 	connect(add_button, &QPushButton::clicked, this, [this]() {
 		message_.clear();
 		builder_->addSelectedPoleParts();
@@ -839,15 +808,12 @@ QWidget *WireBuilderPage::build_poles_group()
 		builder_->clearPoleParts();
 	});
 
-	QGridLayout *grid = new QGridLayout;
-	grid->setColumnStretch(1, 1);
-	grid->setColumnStretch(4, 1);
-	// Where the poles stand goes first, above the list of their assets; its columns are
-	// those of the grid under the list.
+	// Above the list of the assets, one grid: On Ground with what the poles are put on, the
+	// axes of the assets under it, then where the poles stand with the attach points.
 	QGridLayout *top = new QGridLayout;
 	top->setColumnStretch(1, 1);
 	top->setColumnStretch(4, 1);
-	QVector<QLabel *> first_column;
+	QGridLayout *grid = top;
 	// The axes of the pole assets, as in the Road and the Path Placer.
 	const QString turn_note = loc_.tip(
 		"\nA pole can be turned and tilted by hand, as a point of a road: select its point of the "
@@ -871,7 +837,6 @@ QWidget *WireBuilderPage::build_poles_group()
 		QLabel *label = new QLabel(text);
 		label->setToolTip(tooltip);
 		grid->addWidget(label, row, 0);
-		first_column.append(label);
 		QHBoxLayout *buttons_row = new QHBoxLayout;
 		buttons_row->setSpacing(3);
 		group = makeAxisButtons(buttons_row, this, tooltip);
@@ -882,15 +847,16 @@ QWidget *WireBuilderPage::build_poles_group()
 		pole_asset_widgets_ << label << reset_button;
 		for (QAbstractButton *button : group->buttons())
 			pole_asset_widgets_ << button;
+		return buttons_row;
 	};
-	add_axis_row(0, uiText("Forward axis", "Ось вперёд"), forward_tooltip, pole_forward_, [this, defaults]() {
+	add_axis_row(1, uiText("Forward axis", "Ось вперёд"), forward_tooltip, pole_forward_, [this, defaults]() {
 		WireSettings settings = builder_->getSettings();
 		settings.pole_forward = defaults.pole_forward;
 		if (int(settings.pole_up) / 2 == int(settings.pole_forward) / 2)
 			settings.pole_up = defaults.pole_up;
 		builder_->setSettings(settings);
 	});
-	add_axis_row(1, uiText("Up axis", "Ось вверх"), up_tooltip, pole_up_, [this, defaults]() {
+	QHBoxLayout *up_row = add_axis_row(2, uiText("Up axis", "Ось вверх"), up_tooltip, pole_up_, [this, defaults]() {
 		WireSettings settings = builder_->getSettings();
 		settings.pole_up = defaults.pole_up;
 		if (int(settings.pole_up) / 2 == int(settings.pole_forward) / 2)
@@ -909,6 +875,8 @@ QWidget *WireBuilderPage::build_poles_group()
 		"Точки, повёрнутые или наклонённые вручную гизмо, и их столбы снова встают ровно вдоль линии."));
 	connect(reset_turns_button_, &QPushButton::clicked, this, [this]() { builder_->resetPoleTurns(); });
 	pole_asset_widgets_ << reset_turns_button_;
+	// At the right end of the row of the up axis.
+	up_row->addWidget(reset_turns_button_);
 
 	// Where the poles stand: at the points only, or also between them every so many units.
 	const QString spacing_tooltip = loc_.tip(
@@ -920,8 +888,8 @@ QWidget *WireBuilderPage::build_poles_group()
 		"пролёту: точки ставьте только там, где линия поворачивает.");
 	QLabel *spacing_label = new QLabel(uiText("Poles", "Столбы"));
 	spacing_label->setToolTip(spacing_tooltip);
-	top->addWidget(spacing_label, 0, 0);
-	first_column.append(spacing_label);
+	top->addWidget(spacing_label, 3, 0);
+	curve_pole_widgets_ << spacing_label;
 	QHBoxLayout *spacing_row = new QHBoxLayout;
 	spacing_row->setSpacing(3);
 	pole_every_ = new QButtonGroup(this);
@@ -936,16 +904,48 @@ QWidget *WireBuilderPage::build_poles_group()
 		button->setStyleSheet(choiceButtonStyle());
 		pole_every_->addButton(button, id);
 		spacing_row->addWidget(button);
+		curve_pole_widgets_ << button;
 	}
 	pole_spacing_ = make_spin_box(0.1, 100000.0, 1.0, 1, spacing_tooltip);
 	spacing_row->addWidget(pole_spacing_, 1);
-	top->addLayout(spacing_row, 0, 1, 1, 4);
-	top->addWidget(makeResetButton(loc_.tip("Reset to default", "Сбросить на значение по умолчанию"), this, [this, defaults]() {
+	QToolButton *spacing_reset = makeResetButton(loc_.tip("Reset to default", "Сбросить на значение по умолчанию"), this, [this, defaults]() {
 		if (QAbstractButton *button = pole_every_->button(defaults.pole_every ? 1 : 0))
 			button->setChecked(true);
 		pole_spacing_->setValue(defaults.pole_spacing);
 		apply_settings();
-	}), 0, 5);
+	});
+	spacing_row->addWidget(spacing_reset);
+	curve_pole_widgets_ << pole_spacing_ << spacing_reset;
+
+	// The attach points, on the right of where the poles stand.
+	const QString attach_tooltip = loc_.tip(
+		"The name of the attach points inside the poles, before their number: with \"wire\" the "
+		"points are the nodes named wire_1, wire_2... (also wire1, Wire.01). Put dummies of such "
+		"names into the asset of the pole where the wires are fixed - on its insulators.\n"
+		"The wire of number N goes from the point N of one pole to the point N of the next one. "
+		"A pole with no such points is one point itself: all the wires go to it.\n"
+		"The points are shown in the viewport as yellow dots.",
+		"Имя точек крепления внутри столбов, перед номером: при «wire» точки - это ноды с "
+		"именами wire_1, wire_2... (а также wire1, Wire.01). Поставьте пустышки (dummy) с такими "
+		"именами в ассет столба там, где крепятся провода, - на изоляторах.\n"
+		"Провод номер N идёт от точки N одного столба к точке N следующего. Столб без таких "
+		"точек - сам одна точка: к нему приходят все провода.\n"
+		"Во вьюпорте точки показаны жёлтыми точками.");
+	QLabel *attach_label = new QLabel(uiText("Attach Points", "Точки крепления"));
+	attach_label->setToolTip(attach_tooltip);
+	attach_label->setContentsMargins(8, 0, 0, 0);
+	spacing_row->addWidget(attach_label);
+	attach_name_ = new QLineEdit;
+	attach_name_->setToolTip(attach_tooltip);
+	spacing_row->addWidget(attach_name_, 1);
+	top->addLayout(spacing_row, 3, 1, 1, 4);
+	QToolButton *attach_reset = makeResetButton(loc_.tip("Reset to default", "Сбросить на значение по умолчанию"), this, [this]() {
+		attach_name_->setText(WireSettings().attach_name);
+		apply_settings();
+	});
+	top->addWidget(attach_reset, 3, 5);
+	attach_widgets_ << attach_label << attach_name_ << attach_reset;
+	connect(attach_name_, &QLineEdit::editingFinished, this, [this]() { apply_settings(); });
 	layout->insertLayout(0, top);
 	connect(pole_every_, &QButtonGroup::idClicked, this, [this](int) { apply_settings(); });
 	pole_on_ground_ = new QCheckBox(uiText("On Ground", "На землю"));
@@ -955,8 +955,6 @@ QWidget *WireBuilderPage::build_poles_group()
 		"Вкл: каждый столб встаёт на поверхность под своим местом на кривой (и столбы между "
 		"точками тоже). Выкл: на высоте кривой."));
 	connect(pole_on_ground_, &QCheckBox::toggled, this, [this](bool) { apply_settings(); });
-	grid->addWidget(pole_on_ground_, 2, 0, 1, 3);
-	grid->addWidget(reset_turns_button_, 2, 3, 1, 3, Qt::AlignRight);
 
 	// As in the Road: what is left out is looked through.
 	SurfaceFilterButton::Texts filter_texts;
@@ -979,19 +977,18 @@ QWidget *WireBuilderPage::build_poles_group()
 		"Intersection Mask.");
 	filter_texts.reset_tooltip = loc_.tip("Reset to default", "Сбросить на значение по умолчанию");
 	ground_filter_ = new SurfaceFilterButton(filter_texts);
+	// On Ground (shown only while there are poles), then the filter: one row across the
+	// whole width, so that the filter starts at the left edge without On Ground.
 	QLabel *filter_label = new QLabel(uiText("Lay On", "Класть на"));
 	filter_label->setToolTip(filter_texts.tooltip);
-	grid->addWidget(filter_label, 3, 0);
-	first_column.append(filter_label);
-	grid->addWidget(ground_filter_, 3, 1, 1, 5);
+	QHBoxLayout *filter_row = new QHBoxLayout;
+	filter_row->setSpacing(8);
+	filter_row->addWidget(pole_on_ground_);
+	filter_row->addWidget(filter_label);
+	filter_row->addWidget(ground_filter_, 1);
+	grid->addLayout(filter_row, 0, 0, 1, 6);
+	curve_pole_widgets_ << filter_label << ground_filter_;
 	ground_filter_->on_changed = [this]() { apply_settings(); };
-	layout->addLayout(grid);
-	// The fields of the two grids start at the same place.
-	int label_width = 0;
-	for (QLabel *label : first_column)
-		label_width = qMax(label_width, label->sizeHint().width());
-	top->setColumnMinimumWidth(0, label_width);
-	grid->setColumnMinimumWidth(0, label_width);
 	return group;
 }
 
@@ -1094,10 +1091,25 @@ void WireBuilderPage::refresh_pole_list()
 QWidget *WireBuilderPage::build_sag_group()
 {
 	const WireSettings defaults;
+	// Mode | Above Ground, Sag | Random; the rest folded under
+	// "Advanced Settings", in the same two columns.
 	QGroupBox *group = new QGroupBox(uiText("Sag", "Провисание"));
-	QGridLayout *layout = new QGridLayout(group);
-	layout->setColumnStretch(1, 1);
-	layout->setColumnStretch(4, 1);
+	QVBoxLayout *group_layout = new QVBoxLayout(group);
+	QGridLayout *layout = new QGridLayout;
+	group_layout->addLayout(layout);
+	QWidget *advanced_widget = new QWidget;
+	QGridLayout *advanced = new QGridLayout(advanced_widget);
+	advanced->setContentsMargins(0, 0, 0, 0);
+	for (QGridLayout *grid : {layout, advanced})
+	{
+		grid->setColumnStretch(1, 1);
+		grid->setColumnStretch(4, 1);
+	}
+	sag_advanced_header_ = makeSectionHeader(uiText("Advanced Settings", "Дополнительные настройки"), advanced_widget);
+	sag_advanced_header_->setToolTip(loc_.tip("The other settings of the wires.", "Остальные настройки проводов."));
+	group_layout->addWidget(sag_advanced_header_);
+	group_layout->addWidget(advanced_widget);
+	QVector<QWidget *> labels;
 
 	const QString mode_tooltip = loc_.tip(
 		"How Sag is set. It is how far the wire hangs below the straight line between its ends, "
@@ -1121,9 +1133,11 @@ QWidget *WireBuilderPage::build_sag_group()
 	sag_mode_->setFocusPolicy(Qt::StrongFocus);
 	sag_mode_->installEventFilter(this);
 	connect(sag_mode_, &QComboBox::currentIndexChanged, this, [this](int) { apply_settings(); });
+	QVector<QWidget *> row_widgets;
 	add_field(layout, 0, 0, uiText("Mode", "Режим"), sag_mode_, mode_tooltip, [this, defaults]() {
 		sag_mode_->setCurrentIndex(sag_mode_->findData(int(defaults.sag_mode)));
-	});
+	}, &row_widgets);
+	labels << row_widgets[0];
 
 	const QString sag_tooltip = loc_.tip(
 		"How low the wires hang, by Mode: in units, in percent of the length of a wire, or the "
@@ -1131,7 +1145,10 @@ QWidget *WireBuilderPage::build_sag_group()
 		"Насколько низко провисают провода, по [[Mode|«Режиму»]]: в юнитах, в процентах длины "
 		"провода или провисание провода длиной 10 юнитов. 0 - натянут, прямой.");
 	sag_ = make_spin_box(0.0, 10000.0, 0.05, 3, sag_tooltip);
-	add_field(layout, 1, 0, uiText("Sag", "Провисание"), sag_, sag_tooltip, [this, defaults]() { sag_->setValue(defaults.sag); });
+	row_widgets.clear();
+	add_field(layout, 1, 0, uiText("Sag", "Провисание"), sag_, sag_tooltip, [this, defaults]() { sag_->setValue(defaults.sag); },
+		&row_widgets);
+	labels << row_widgets[0];
 
 	const QString random_tooltip = loc_.tip(
 		"How much more than Sag a wire may hang, in percent of Sag: every wire gets its own sag "
@@ -1144,8 +1161,10 @@ QWidget *WireBuilderPage::build_sag_group()
 		"выше «Провисания». Каждый провод сохраняет своё, пока столбы двигают; [[Seed|«Сид»]] даёт другие.");
 	sag_random_ = make_spin_box(0.0, 1000.0, 1.0, 1, random_tooltip);
 	sag_random_->setSuffix(QString::fromUtf8(" %"));
-	add_field(layout, 3, 0, uiText("Random", "Разброс"), sag_random_, random_tooltip,
-		[this, defaults]() { sag_random_->setValue(defaults.sag_random); });
+	row_widgets.clear();
+	add_field(layout, 1, 1, uiText("Random", "Разброс"), sag_random_, random_tooltip,
+		[this, defaults]() { sag_random_->setValue(defaults.sag_random); }, &row_widgets);
+	labels << row_widgets[0];
 
 	const QString angle_tooltip = loc_.tip(
 		"How the wires are cut into segments: a wire turns by at most this many degrees from one "
@@ -1158,8 +1177,10 @@ QWidget *WireBuilderPage::build_sag_group()
 		"изгибается сильнее всего. Меньше - плавнее и больше треугольников.");
 	segment_angle_ = make_spin_box(0.1, 90.0, 0.5, 1, angle_tooltip);
 	segment_angle_->setSuffix(QString::fromUtf8("°"));
-	add_field(layout, 0, 1, uiText("Bend Angle", "Угол изгиба"), segment_angle_, angle_tooltip,
-		[this, defaults]() { segment_angle_->setValue(defaults.segment_angle); });
+	row_widgets.clear();
+	add_field(advanced, 0, 0, uiText("Bend Angle", "Угол изгиба"), segment_angle_, angle_tooltip,
+		[this, defaults]() { segment_angle_->setValue(defaults.segment_angle); }, &row_widgets);
+	labels << row_widgets[0];
 
 	const QString min_tooltip = loc_.tip(
 		"The fewest segments a wire has, however straight it is: short or tight wires do not get "
@@ -1173,8 +1194,10 @@ QWidget *WireBuilderPage::build_sag_group()
 	min_segments_->installEventFilter(this);
 	enableSpinBoxDrag(min_segments_);
 	connect(min_segments_, &QSpinBox::valueChanged, this, [this](int) { apply_settings(); });
-	add_field(layout, 1, 1, uiText("Min Segments", "Мин. сегментов"), min_segments_, min_tooltip,
-		[this, defaults]() { min_segments_->setValue(defaults.min_segments); });
+	row_widgets.clear();
+	add_field(advanced, 0, 1, uiText("Min Segments", "Мин. сегментов"), min_segments_, min_tooltip,
+		[this, defaults]() { min_segments_->setValue(defaults.min_segments); }, &row_widgets);
+	labels << row_widgets[0];
 
 	const QString max_tooltip = loc_.tip(
 		"The longest a segment may be, in units: a longer one is cut into equal ones. Needed only "
@@ -1185,8 +1208,10 @@ QWidget *WireBuilderPage::build_sag_group()
 		"участках провода. Выкл - без ограничения, сегменты задаются только изгибом.");
 	max_segment_length_ = make_spin_box(0.0, 10000.0, 0.5, 2, max_tooltip);
 	max_segment_length_->setSpecialValueText(uiText("Off", "Выкл"));
-	add_field(layout, 2, 1, uiText("Max Length", "Макс. длина"), max_segment_length_, max_tooltip,
-		[this, defaults]() { max_segment_length_->setValue(defaults.max_segment_length); });
+	row_widgets.clear();
+	add_field(advanced, 1, 1, uiText("Max Length", "Макс. длина"), max_segment_length_, max_tooltip,
+		[this, defaults]() { max_segment_length_->setValue(defaults.max_segment_length); }, &row_widgets);
+	labels << row_widgets[0];
 
 	above_ground_ = new QCheckBox(uiText("Above Ground", "Не ниже земли"));
 	above_ground_->setToolTip(loc_.tip(
@@ -1194,7 +1219,8 @@ QWidget *WireBuilderPage::build_sag_group()
 		"ground is what Lay On of Poles lets through.",
 		"Вкл: где провод провис бы ниже земли, он ложится на неё, как кабель. Земля - то, что "
 		"пропускает [[Lay On|«Класть на»]] из «Столбов»."));
-	layout->addWidget(above_ground_, 3, 3, 1, 3);
+	above_ground_->setContentsMargins(8, 0, 0, 0);
+	layout->addWidget(above_ground_, 0, 3, 1, 3);
 	connect(above_ground_, &QCheckBox::toggled, this, [this](bool) { apply_settings(); });
 
 	const QString seed_tooltip = loc_.tip(
@@ -1222,9 +1248,25 @@ QWidget *WireBuilderPage::build_sag_group()
 	seed_random->setToolTip(loc_.tip("Generate a random seed.", "Сгенерировать случайный сид."));
 	seed_layout->addWidget(seed_random);
 	connect(seed_random, &QToolButton::clicked, this, [this]() {
-		seed_->setValue(int(QRandomGenerator::global()->bounded(std::numeric_limits<int>::max())));
+		seed_->setValue(WireBuilder::randomSeed());
 	});
-	add_field(layout, 2, 0, uiText("Seed", "Сид"), seed_field, seed_tooltip, [this, defaults]() { seed_->setValue(defaults.seed); });
+	// A new line gets a random seed; the reset gives another one.
+	row_widgets.clear();
+	add_field(advanced, 1, 0, uiText("Seed", "Сид"), seed_field, seed_tooltip, [this, seed_random]() { seed_random->click(); },
+		&row_widgets);
+	labels << row_widgets[0];
+	// There is no default seed: a new line gets a random one, so does its reset.
+	row_widgets[2]->setToolTip(loc_.tip("A new random seed, as a new line gets.", "Новый случайный сид, как у новой линии."));
+
+	// The labels of the two grids as wide, so that their fields stand one under another.
+	int label_width = 0;
+	for (QWidget *label : labels)
+		label_width = qMax(label_width, label->sizeHint().width());
+	for (QGridLayout *grid : {layout, advanced})
+	{
+		grid->setColumnMinimumWidth(0, label_width);
+		grid->setColumnMinimumWidth(3, label_width);
+	}
 	return group;
 }
 
@@ -1234,11 +1276,23 @@ QWidget *WireBuilderPage::build_sag_group()
 QWidget *WireBuilderPage::build_shape_group()
 {
 	const WireSettings defaults;
+	// The rotation, the twist and the size of the pieces are folded under "Advanced Settings"
+	// at the bottom, in the same columns.
 	QGroupBox *group = new QGroupBox(uiText("Shape", "Форма"));
-	QGridLayout *layout = new QGridLayout(group);
-	layout->setColumnStretch(1, 1);
-	layout->setColumnStretch(4, 1);
+	QVBoxLayout *group_layout = new QVBoxLayout(group);
+	QGridLayout *layout = new QGridLayout;
+	group_layout->addLayout(layout);
+	QWidget *advanced_widget = new QWidget;
+	QGridLayout *advanced = new QGridLayout(advanced_widget);
+	advanced->setContentsMargins(0, 0, 0, 0);
+	for (QGridLayout *grid : {layout, advanced})
+	{
+		grid->setColumnStretch(1, 1);
+		grid->setColumnStretch(4, 1);
+	}
 	int row = 0;
+	int advanced_row = 0;
+	QVector<QWidget *> first_labels;
 
 	const QString shape_tooltip = loc_.tip(
 		"What the wires are made of.\n"
@@ -1259,6 +1313,7 @@ QWidget *WireBuilderPage::build_shape_group()
 	QLabel *shape_label = new QLabel(uiText("Make Of", "Сделать из"));
 	shape_label->setToolTip(shape_tooltip);
 	layout->addWidget(shape_label, row, 0);
+	first_labels << shape_label;
 	QHBoxLayout *shape_row = new QHBoxLayout;
 	shape_row->setSpacing(3);
 	shape_ = new QButtonGroup(this);
@@ -1313,13 +1368,16 @@ QWidget *WireBuilderPage::build_shape_group()
 		"лучше 45°: ни одна полоска не лежит плашмя. [[Random|«Случайно»]] - каждому проводу свой поворот.");
 	rotation_ = make_spin_box(-360.0, 360.0, 5.0, 1, rotation_tooltip);
 	rotation_->setSuffix(QString::fromUtf8("°"));
-	add_field(layout, row, 0, uiText("Rotation", "Поворот"), rotation_, rotation_tooltip,
-		[this, defaults]() { rotation_->setValue(defaults.rotation); });
+	QVector<QWidget *> rotation_row;
+	add_field(advanced, advanced_row, 0, uiText("Rotation", "Поворот"), rotation_, rotation_tooltip,
+		[this, defaults]() { rotation_->setValue(defaults.rotation); }, &rotation_row);
+	first_labels << rotation_row[0];
 	random_rotation_ = new QCheckBox(uiText("Random", "Случайно"));
 	random_rotation_->setToolTip(rotation_tooltip);
+	random_rotation_->setContentsMargins(8, 0, 0, 0);
 	connect(random_rotation_, &QCheckBox::toggled, this, [this](bool) { apply_settings(); });
-	layout->addWidget(random_rotation_, row, 3, 1, 3);
-	++row;
+	advanced->addWidget(random_rotation_, advanced_row, 3, 1, 3);
+	++advanced_row;
 
 	const QString twist_tooltip = loc_.tip(
 		"How many turns the shape winds about the wire: a twisted ribbon, a twisted cable. The "
@@ -1339,7 +1397,10 @@ QWidget *WireBuilderPage::build_shape_group()
 		"[[Turns Per Unit|Оборотов на юнит]] - оборотов на юнит длины: длинный провод "
 		"закручен больше раз.");
 	twist_ = make_spin_box(-1000.0, 1000.0, 0.1, 2, twist_tooltip);
-	add_field(layout, row, 0, uiText("Twist", "Закрутка"), twist_, twist_tooltip, [this, defaults]() { twist_->setValue(defaults.twist); });
+	QVector<QWidget *> twist_row;
+	add_field(advanced, advanced_row, 0, uiText("Twist", "Закрутка"), twist_, twist_tooltip,
+		[this, defaults]() { twist_->setValue(defaults.twist); }, &twist_row);
+	first_labels << twist_row[0];
 	twist_mode_ = new QComboBox;
 	twist_mode_->addItem(uiText("Turns Per Span", "Оборотов на пролёт"), int(WIRE_TWIST_PER_SPAN));
 	twist_mode_->addItem(uiText("Turns Per Unit", "Оборотов на юнит"), int(WIRE_TWIST_PER_UNIT));
@@ -1347,8 +1408,8 @@ QWidget *WireBuilderPage::build_shape_group()
 	twist_mode_->setFocusPolicy(Qt::StrongFocus);
 	twist_mode_->installEventFilter(this);
 	connect(twist_mode_, &QComboBox::currentIndexChanged, this, [this](int) { apply_settings(); });
-	layout->addWidget(twist_mode_, row, 3, 1, 3);
-	++row;
+	advanced->addWidget(twist_mode_, advanced_row, 3, 1, 3);
+	++advanced_row;
 
 	const QString twist_step_tooltip = loc_.tip(
 		"A strip or a tube turns by the twist at its joints only. A segment longer than this many "
@@ -1360,9 +1421,10 @@ QWidget *WireBuilderPage::build_shape_group()
 	twist_step_ = make_spin_box(0.0, 180.0, 5.0, 1, twist_step_tooltip);
 	twist_step_->setSuffix(QString::fromUtf8("°"));
 	twist_step_->setSpecialValueText(uiText("Off", "Выкл"));
-	add_field(layout, row, 0, uiText("Twist Step", "Шаг закрутки"), twist_step_, twist_step_tooltip,
+	add_field(advanced, advanced_row, 0, uiText("Twist Step", "Шаг закрутки"), twist_step_, twist_step_tooltip,
 		[this, defaults]() { twist_step_->setValue(defaults.twist_step); }, &twist_step_widgets_);
-	++row;
+	first_labels << twist_step_widgets_[0];
+	++advanced_row;
 
 	// The material of the strips and the tubes, a field as the editor's own.
 	const QString material_tooltip = loc_.tip(
@@ -1382,7 +1444,11 @@ QWidget *WireBuilderPage::build_shape_group()
 	material_options.dialog_title = uiText("Material of the wires", "Материал проводов");
 	material_options.filter = QString::fromUtf8(".mat");
 	material_options.icon = QString::fromUtf8(":/images/assets/file_material.png");
-	material_options.reset_tooltip = loc_.tip("Back to the base material.", "Вернуть базовый материал.");
+	material_options.reset_tooltip = loc_.tip(
+		"Back to the default material of the shape: wire_alpha_blend for a cross, wire_solid for a "
+		"ribbon or a tube (mesh_base if they are gone from the project).",
+		"Вернуть материал по умолчанию для формы: wire_alpha_blend для крестовины, wire_solid для "
+		"ленты и трубки (mesh_base, если их нет в проекте).");
 	material_options.show_tooltip = loc_.tip("Show the material in the Asset Browser.", "Показать материал в Asset Browser.");
 	material_options.take_text = uiText("Use Selected", "Взять выделенный");
 	material_options.take_tooltip = loc_.tip("Take the material selected in the Asset Browser.",
@@ -1398,36 +1464,6 @@ QWidget *WireBuilderPage::build_shape_group()
 	material_field_->on_reset = [this]() {
 		message_.clear();
 		builder_->clearMaterial();
-	};
-	++row;
-
-	// The mesh laid along the wires.
-	const QString mesh_tooltip = loc_.tip(
-		"The mesh laid along every wire: pick a .mesh, a .node or a model with the folder button or "
-		"drag it here from the Asset Browser. It is repeated along the wire and bent to follow it.",
-		"Меш, который раскладывается вдоль каждого провода: выберите .mesh, .node или модель кнопкой "
-		"с папкой или перетащите сюда из Asset Browser. Он повторяется вдоль провода и изгибается по нему.");
-	QLabel *mesh_title = new QLabel(uiText("Mesh", "Меш"));
-	mesh_title->setToolTip(mesh_tooltip);
-	layout->addWidget(mesh_title, row, 0);
-	AssetField::Options mesh_options;
-	mesh_options.tooltip = mesh_tooltip;
-	mesh_options.dialog_title = uiText("Mesh laid along the wires", "Меш вдоль проводов");
-	mesh_options.icon = QString::fromUtf8(":/images/mods/icon_object_mode.png");
-	mesh_options.show_tooltip = loc_.tip("Show the mesh in the Asset Browser.", "Показать меш в Asset Browser.");
-	mesh_options.take_text = uiText("Use Selected", "Взять выделенный");
-	mesh_options.take_tooltip = loc_.tip("Take the mesh, node or model selected in the Asset Browser.",
-		"Взять меш, ноду или модель, выделенную в Asset Browser.");
-	mesh_field_ = new AssetField(mesh_options);
-	layout->addWidget(mesh_field_, row, 1, 1, 5);
-	mesh_widgets_ << mesh_title << mesh_field_;
-	mesh_field_->on_picked = [this](const Unigine::Vector<Unigine::UGUID> &guids) {
-		message_.clear();
-		builder_->takeMesh(guids);
-	};
-	mesh_field_->on_show = [this]() {
-		message_ = builder_->showMesh() ? QString() : uiText("The mesh is not found in the project.", "Меш не найден в проекте.");
-		refresh();
 	};
 	++row;
 
@@ -1490,6 +1526,69 @@ QWidget *WireBuilderPage::build_shape_group()
 	add_field(layout, row, 1, uiText("Mesh Angle", "Угол меша"), mesh_angle_, angle_tooltip,
 		[this, defaults]() { mesh_angle_->setValue(defaults.mesh_angle); }, &mesh_widgets_);
 	++row;
+
+	// The mesh laid along the wires, under its scale.
+	const QString mesh_tooltip = loc_.tip(
+		"The mesh laid along every wire: pick a .mesh, a .node or a model with the folder button or "
+		"drag it here from the Asset Browser. It is repeated along the wire and bent to follow it.",
+		"Меш, который раскладывается вдоль каждого провода: выберите .mesh, .node или модель кнопкой "
+		"с папкой или перетащите сюда из Asset Browser. Он повторяется вдоль провода и изгибается по нему.");
+	QLabel *mesh_title = new QLabel(uiText("Mesh", "Меш"));
+	mesh_title->setToolTip(mesh_tooltip);
+	layout->addWidget(mesh_title, row, 0);
+	AssetField::Options mesh_options;
+	mesh_options.tooltip = mesh_tooltip;
+	mesh_options.dialog_title = uiText("Mesh laid along the wires", "Меш вдоль проводов");
+	mesh_options.icon = QString::fromUtf8(":/images/mods/icon_object_mode.png");
+	mesh_options.show_tooltip = loc_.tip("Show the mesh in the Asset Browser.", "Показать меш в Asset Browser.");
+	mesh_options.take_text = uiText("Use Selected", "Взять выделенный");
+	mesh_options.take_tooltip = loc_.tip("Take the mesh, node or model selected in the Asset Browser.",
+		"Взять меш, ноду или модель, выделенную в Asset Browser.");
+	mesh_field_ = new AssetField(mesh_options);
+	layout->addWidget(mesh_field_, row, 1, 1, 5);
+	mesh_widgets_ << mesh_title << mesh_field_;
+	mesh_field_->on_picked = [this](const Unigine::Vector<Unigine::UGUID> &guids) {
+		message_.clear();
+		builder_->takeMesh(guids);
+	};
+	mesh_field_->on_show = [this]() {
+		message_ = builder_->showMesh() ? QString() : uiText("The mesh is not found in the project.", "Меш не найден в проекте.");
+		refresh();
+	};
+	++row;
+
+	// How the line is cut into pieces.
+	QVector<QWidget *> piece_row;
+	const QString piece_tooltip = loc_.tip(
+		"The wires are cut into pieces by squares of the world grid of this size, in units: every "
+		"piece is a node and a mesh of its own, with the wires whose middle is in its square - "
+		"what is far away is not drawn. A line is cut at the poles, shown by yellow planes in the "
+		"viewport. 0 - the whole line is one piece.",
+		"Провода режутся на куски по квадратам сетки мира такого размера, в юнитах: каждый кусок - "
+		"своя нода и свой меш с проводами, середина которых в его квадрате, - то, что далеко, не "
+		"рисуется. Линия режется у столбов - во вьюпорте там жёлтые плоскости. 0 - вся линия одним куском.");
+	piece_size_ = make_spin_box(0.0, 100000.0, 10.0, 1, piece_tooltip);
+	add_field(advanced, advanced_row, 0, uiText("Piece Size", "Размер куска"), piece_size_, piece_tooltip,
+		[this, defaults]() { piece_size_->setValue(defaults.piece_size); }, &piece_row);
+	first_labels << piece_row[0];
+	++advanced_row;
+
+	shape_advanced_header_ = makeSectionHeader(uiText("Advanced Settings", "Дополнительные настройки"), advanced_widget);
+	shape_advanced_header_->setToolTip(loc_.tip("The rotation and the twist of the wires, the size of the pieces.",
+		"Поворот и закрутка проводов, размер кусков."));
+	group_layout->addWidget(shape_advanced_header_);
+	group_layout->addWidget(advanced_widget);
+	// The labels that are always there set the first column of both grids alike, so that
+	// the fields under the header stand under those above it.
+	int label_width = 0;
+	for (QWidget *label : first_labels)
+		label_width = qMax(label_width, label->sizeHint().width());
+	for (QGridLayout *grid : {layout, advanced})
+		grid->setColumnMinimumWidth(0, label_width);
+
+	// The texture of the wires and what is made of them, frames inside Shape.
+	group_layout->addWidget(build_texture_group());
+	group_layout->addWidget(build_output_group());
 	return group;
 }
 
@@ -1617,18 +1716,6 @@ QWidget *WireBuilderPage::build_output_group()
 	QGridLayout *layout = new QGridLayout(group);
 	layout->setColumnStretch(1, 1);
 	layout->setColumnStretch(4, 1);
-
-	const QString piece_tooltip = loc_.tip(
-		"The wires are cut into pieces by squares of the world grid of this size, in units: every "
-		"piece is a node and a mesh of its own, with the wires whose middle is in its square - "
-		"what is far away is not drawn. A line is cut at the poles, shown by yellow planes in the "
-		"viewport. 0 - the whole line is one piece.",
-		"Провода режутся на куски по квадратам сетки мира такого размера, в юнитах: каждый кусок - "
-		"своя нода и свой меш с проводами, середина которых в его квадрате, - то, что далеко, не "
-		"рисуется. Линия режется у столбов - во вьюпорте там жёлтые плоскости. 0 - вся линия одним куском.");
-	piece_size_ = make_spin_box(0.0, 100000.0, 10.0, 1, piece_tooltip);
-	add_field(layout, 0, 0, uiText("Piece Size", "Размер куска"), piece_size_, piece_tooltip,
-		[this, defaults]() { piece_size_->setValue(defaults.piece_size); });
 
 	// The LOD of the strips and the tubes, under the distances of the whole wires.
 	lod_ = new QCheckBox(uiText("LOD", "LOD"));
@@ -1849,8 +1936,8 @@ void WireBuilderPage::refresh()
 	show_value(pole_spacing_, settings.pole_spacing);
 	if (QAbstractButton *button = pole_every_->button(settings.pole_every ? 1 : 0))
 		button->setChecked(true);
-	// Only for poles between the points.
-	pole_spacing_->setVisible(settings.pole_every);
+	// Only for poles between the points; stays in its place, so that the buttons do not jump.
+	pole_spacing_->setEnabled(settings.pole_every);
 	if (QAbstractButton *button = pole_forward_->button(settings.pole_forward))
 		button->setChecked(true);
 	if (QAbstractButton *button = pole_up_->button(settings.pole_up))
@@ -1878,23 +1965,28 @@ void WireBuilderPage::refresh()
 	twist_mode_->setVisible(builder_->hasTwist());
 
 	// What is only about the poles: not for a garland (a curve with no assets of poles);
-	// On Ground not for insulators that stand at the points themselves either.
+	// On Ground not for insulators that stand at the points themselves either. A line of
+	// the poles of the world has none of it (it may still carry the assets of the line it
+	// was started from).
 	{
 		const bool curve_line = builder_->isCurveLine();
+		const bool link = has_line && !curve_line;
 		bool poles = false;
 		for (const WirePolePart &part : settings.pole_parts)
 			poles = poles || part.role != WIRE_POLE_INSULATOR;
 		const bool any_asset = !settings.pole_parts.isEmpty();
 		for (QWidget *widget : pole_asset_widgets_)
-			widget->setVisible(any_asset);
-		pole_on_ground_->setVisible(poles);
+			widget->setVisible(any_asset && !link);
+		pole_on_ground_->setVisible(poles && !link);
 		for (QWidget *widget : attach_widgets_)
 			widget->setVisible(!curve_line || any_asset);
 	}
 
 	const QString material = builder_->getMaterialName();
-	material_field_->setValue(material.isEmpty() ? QString::fromUtf8("mesh_base") : material, !material.isEmpty());
-	material_field_->setShowEnabled(!material.isEmpty());
+	const QString default_material = builder_->getDefaultMaterialName();
+	material_field_->setValue(material.isEmpty() ? default_material : material, !material.isEmpty());
+	// The default one is shown in the Asset Browser too, if it is a file of the project.
+	material_field_->setShowEnabled(!material.isEmpty() || default_material != QLatin1String("mesh_base"));
 	mesh_field_->setValue(settings.mesh_name.isEmpty() ? uiText("(none)", "(не выбран)") : settings.mesh_name,
 		!settings.mesh_name.isEmpty());
 	mesh_field_->setShowEnabled(!settings.mesh_source.isEmpty());
@@ -1925,9 +2017,15 @@ void WireBuilderPage::refresh()
 	add_poles_button_->setText(builder_->isAddingPoles() ? uiText("Stop Adding Poles (Esc)", "Закончить добавление (Esc)")
 		: uiText("Add Poles", "Добавить столбы"));
 	add_poles_button_->setVisible(link);
+	// Green while the poles of the world are being connected (clicked one after another).
+	new_link_button_->setStyleSheet(link && builder_->isAddingPoles() ? goButtonStyle() : QString());
 	point_row_->setVisible(!link);
 	link_row_->setVisible(link);
-	poles_group_->setVisible(!link);
+	// A line of the poles of the world has only its attach points here.
+	for (QWidget *widget : curve_pole_widgets_)
+		widget->setVisible(!link);
+	if (link)
+		pole_empty_label_->setVisible(false);
 	const CurvePointsState points = builder_->getSelectedPointsState();
 	smooth_button_->setEnabled(curve && points != POINTS_NONE);
 	corner_button_->setEnabled(curve && points != POINTS_NONE);

@@ -15,6 +15,7 @@
 	#include "UiGalleryPage.h"
 #endif
 
+#include <editor/UnigineWindowManager.h>
 #include <editor/UniginePluginInfo.h>
 #include <editor/UniginePluginManager.h>
 
@@ -103,6 +104,8 @@ public:
 	// else gray.
 	void addTab(QWidget *page, const QIcon &icon, const QString &text, bool colored = true)
 	{
+		// The frames of every tab a little darker than the page.
+		tintPageFrames(page);
 		QToolButton *button = new QToolButton;
 		button->setText(text);
 		button->setIcon(icon);
@@ -405,10 +408,11 @@ void ArtistToolWindow::hideEvent(QHideEvent *event)
 {
 	QWidget::hideEvent(event);
 
-	// Docking and undocking hide the window for a moment too: it is closed only if it
-	// is still hidden when that is over.
+	// Docking and undocking hide the window for a moment too, and so does another tab
+	// of the same dock area: it is closed only if the editor counts it hidden (not just
+	// out of sight) when that is over.
 	QTimer::singleShot(0, this, [this]() {
-		if (!isVisible())
+		if (!isVisible() && !::UnigineEditor::WindowManager::isVisible(this))
 			object_placer_page_->resetFilter();
 	});
 }

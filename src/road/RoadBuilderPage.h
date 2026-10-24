@@ -53,6 +53,7 @@ private:
 	QWidget *build_shape_group();
 	QWidget *build_ground_block();
 	QWidget *build_texture_group();
+	QWidget *build_color_group();
 	QWidget *build_output_group();
 	QWidget *build_bend_block();
 	// The two axes of the bent meshes can not be the same: the other one takes the
@@ -72,6 +73,8 @@ private:
 	RoadSettings read_settings() const;
 	void apply_settings();
 	void refresh();
+	// The vertex color views in "In the viewport" only while the road has the colors.
+	void refresh_view_items(bool colors);
 	void rescan_roads();
 	void refresh_roads(bool rescan_if_missing = true);
 	void browse_folder();
@@ -123,14 +126,15 @@ private:
 	QDoubleSpinBox *side_offset_{nullptr};
 	// The grid of Shape and the label, field and reset button of every field in it.
 	QGridLayout *shape_layout_{nullptr};
+	// The grid under the "More" header, folded by default.
+	QGridLayout *shape_more_layout_{nullptr};
+	QToolButton *shape_more_header_{nullptr};
 	QHash<QWidget *, QVector<QWidget *>> shape_fields_;
 	int shape_bent_{-1};
 	QCheckBox *snap_to_ground_{nullptr};
 	QPushButton *refresh_ground_{nullptr};
 	QCheckBox *snap_after_release_{nullptr};
 	// The row under Snap To Ground, shown only while it is on and a mesh is made.
-	QWidget *ground_offset_row_[3]{};
-	QDoubleSpinBox *ground_offset_{nullptr};
 	SurfaceFilterButton *ground_filter_{nullptr};
 
 	QDoubleSpinBox *uv_length_{nullptr};
@@ -138,12 +142,24 @@ private:
 	QDial *uv_rotation_{nullptr};
 	QLabel *uv_rotation_value_{nullptr};
 
+	// Vertex Color: the checkbox and the rows of the channels, shown while it is on.
+	QCheckBox *vertex_colors_{nullptr};
+	QWidget *color_rows_{nullptr};
+	QDoubleSpinBox *color_edge_{nullptr};
+	QDoubleSpinBox *color_start_fade_{nullptr};
+	QDoubleSpinBox *color_end_fade_{nullptr};
+	QButtonGroup *color_green_{nullptr};
+	QDoubleSpinBox *color_noise_size_{nullptr};
 
 	QButtonGroup *output_{nullptr};
 	// The rows of the decal settings, shown only for a decal.
 	QVector<QWidget *> decal_rows_;
 	QDoubleSpinBox *decal_depth_{nullptr};
+	// Lift Above Ground: the lift of a decal, or the offset from the ground of a mesh.
 	QDoubleSpinBox *decal_lift_{nullptr};
+	// The output whose lift the field shows.
+	int lift_output_{-1};
+	QVector<QWidget *> lift_row_;
 	QDoubleSpinBox *decal_visible_distance_{nullptr};
 	QDoubleSpinBox *decal_fade_distance_{nullptr};
 	QDoubleSpinBox *piece_length_{nullptr};
@@ -178,6 +194,10 @@ private:
 
 	// What is drawn over the road in the viewport (RoadView).
 	QComboBox *view_{nullptr};
+	// The view the user picked: a vertex color one is kept while the road has no colors
+	// (the grid is shown then) and comes back with them.
+	int wanted_view_{0};
+	bool view_items_changing_{false};
 	QCheckBox *hide_outdated_{nullptr};
 	QLabel *stats_label_{nullptr};
 	QPushButton *generate_button_{nullptr};

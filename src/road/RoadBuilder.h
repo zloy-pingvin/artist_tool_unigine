@@ -4,6 +4,7 @@
 #include "MeshBender.h"
 
 #include <UnigineCallback.h>
+#include <UnigineDecals.h>
 #include <UnigineMaterial.h>
 #include <UnigineObjects.h>
 #include <UnigineMathLib.h>
@@ -79,6 +80,22 @@ enum RoadView
 	ROAD_VIEW_GRID = 0,
 	// The curve and its points only.
 	ROAD_VIEW_CURVE,
+	// The grid filled with a channel of the vertex colors (gray: white - 1, black - 0),
+	// or with all three.
+	ROAD_VIEW_COLOR_R,
+	ROAD_VIEW_COLOR_G,
+	ROAD_VIEW_COLOR_B,
+	ROAD_VIEW_COLOR_RGB,
+};
+
+// How the green channel of the vertex colors goes along the road.
+enum RoadGreenMode
+{
+	// From one point of the curve to the next: 1 at the first point, 0 at the second, 1
+	// at the third...
+	ROAD_GREEN_POINT_TO_POINT = 0,
+	// 1 at every point, 0 in the middle between two points (as the sway of a wire).
+	ROAD_GREEN_TO_MIDDLE,
 };
 
 // How the mesh of a road is built. Stored in the root node of the road.
@@ -90,7 +107,7 @@ struct RoadSettings
 	// of the ground under it.
 	int columns{4};
 	// The longest a row of the grid may be along the road, in units.
-	float step{2.0f};
+	float step{20.0f};
 	// On a bend the rows get shorter: the road turns by at most this angle from one
 	// row to the next, in degrees.
 	float max_angle{5.0f};
@@ -99,10 +116,12 @@ struct RoadSettings
 	// Every vertex of the grid is put on the surface under it.
 	bool snap_to_ground{false};
 	// How far above that surface, in units.
-	float ground_offset{0.05f};
+	float ground_offset{0.01f};
 	// What the road and its points are laid on; everything else is looked through
-	// (a road over rocks lies on the terrain under them).
-	SurfaceFilter ground;
+	// (a road over rocks lies on the terrain under them). The terrain and static meshes
+	// only by default: a ray through clutters and clusters (grass, branches, trees) is
+	// tens of times slower, and a road is not laid on them anyway.
+	SurfaceFilter ground{SurfaceFilter::TERRAIN | SurfaceFilter::MESH_STATIC};
 	// The inner edge of a tight bend is laid along a smooth arc where it gets sharper
 	// than this radius or folds over itself; the arc takes in this much of the road
 	// before and after that place, in units. 0 - only the folds are rounded.
@@ -122,9 +141,26 @@ struct RoadSettings
 	// The texture turned on the road, in degrees: for a texture drawn with its road
 	// going across it, 90.
 	float uv_rotation{0.0f};
+	// The vertex colors of the grid, for the material (off - every vertex white):
+	// R - 0 at the edges and at the ends of the road, 1 inside (a mask for the alpha);
+	// G - a smooth gradient between the points of the curve (see RoadGreenMode);
+	// B - a random value at every vertex. A is 1.
+	bool vertex_colors{false};
+	// How wide the strip along each edge is where R goes from 0 to 1, in units; a
+	// column of vertices is added there. 0 - no fade at the edges.
+	float color_edge{1.0f};
+	// How long the part at the start and at the end of the road is where R goes from 0
+	// to 1, in units; a row of vertices is added there. 0 - no fade there.
+	float color_start_fade{0.0f};
+	float color_end_fade{0.0f};
+	RoadGreenMode color_green{ROAD_GREEN_POINT_TO_POINT};
+	// How big the spots of the noise of B are, in units: vertices closer than that get
+	// close values. 0 - every vertex its own.
+	float color_noise_size{0.0f};
 	// The longest one piece of the road may be, in units; a longer road is cut into
-	// pieces, each a node and a mesh of its own. 0 - the road is one piece.
-	float piece_length{50.0f};
+	// pieces, each a node and a mesh of its own. 0 - the road is one piece. The default
+	// depends on the output: RoadBuilder::defaultPieceLength().
+	float piece_length{100.0f};
 	RoadOutput output{ROAD_OUTPUT_MESH};
 	// The depth a decal is projected to, in units: how far below its mesh it still
 	// lies on what is there.
@@ -135,8 +171,8 @@ struct RoadSettings
 	float decal_lift{0.3f};
 	// From what distance to the camera the decal starts to fade out, and over what
 	// distance it fades out then, in units. 0 - always seen / no fading.
-	float decal_visible_distance{0.0f};
-	float decal_fade_distance{0.0f};
+	float decal_visible_distance{275.0f};
+	float decal_fade_distance{25.0f};
 	// The material of the road: GUID of the .mat file, empty - the base one.
 	QString material;
 	// The meshes bent along the curve for the Bent Mesh output, in order; their
@@ -180,6 +216,7 @@ struct RoadGrid
 	QVector<Unigine::Math::Vec3> vertices;
 	QVector<Unigine::Math::vec3> normals;
 	QVector<Unigine::Math::vec2> uvs;
+	QVector<Unigine::Math::vec4> colors;
 	// The station each piece of the road starts at; it ends at the start of the next
 	// one, the last one at the last station.
 	QVector<int> piece_starts;
@@ -351,11 +388,14 @@ public:
 	bool takeMaterial(const Unigine::Vector<Unigine::UGUID> &guids);
 	// Selects the material of the road in the Asset Browser.
 	bool showMaterial() const;
-	// Back to the base material, for the pieces too.
+	// Back to the default material, for the pieces too.
 	void clearMaterial();
 	// The name of the material the pieces of the road have (it may have been set on
-	// them by hand), or of the one the road gives its pieces; empty for the base one.
+	// them by hand), or of the one the road gives its pieces; empty for the default one.
 	QString getMaterialName() const;
+	// road_mesh for a mesh, road_decal for decals (they come with the plugin); mesh_base
+	// or decal_base if they are gone from the project.
+	QString getDefaultMaterialName() const;
 
 	// Adds the assets selected in the Asset Browser to the end of the meshes bent along
 	// the curve (Bent Mesh): .mesh, .node or imported models, with their materials.
@@ -405,6 +445,9 @@ public:
 	RoadView getView() const { return view_; }
 	// The most triangles a piece of a decal road gets; a longer piece is cut.
 	static int maxDecalTriangles();
+	// The default Max Piece Length of the output: 100 for a mesh and decals, 50 for a
+	// bent mesh (its pieces are heavier).
+	static float defaultPieceLength(RoadOutput output);
 	bool isSnapAfterRelease() const { return snap_after_release_; }
 	// Whether the heights of the ground are read from the Landscape Terrain directly,
 	// which is much faster than raycasts: when only Terrain is checked in "Lay On".
@@ -474,11 +517,19 @@ private:
 	BendFrame bend_frame(double distance) const;
 	// The mesh of one piece of the road grid, the positions relative to 'pivot'.
 	Unigine::MeshPtr make_road_mesh(int piece, Unigine::Math::Vec3 &pivot) const;
+	// The mesh of the rows [first, last] of the grid; without the collision data for a
+	// preview.
+	Unigine::MeshPtr make_grid_mesh(int first, int last, Unigine::Math::Vec3 &pivot, bool collision) const;
+	// The material a new piece of the kind gets, as the preview shows it: the one of the
+	// pieces of that kind the road has (it may be given by hand), else the one of the road
+	// if it suits, else the base one.
+	Unigine::MaterialPtr piece_material(Unigine::Node::TYPE type) const;
 	// The bent copies of one piece, the positions relative to 'pivot'.
 	Unigine::MeshPtr bend_mesh(int first_copy, int end_copy, Unigine::Math::Vec3 &pivot) const;
-	// The bent mesh shown in the viewport while it is not generated: made anew when the
-	// road changes, hidden when its pieces are up to date.
+	// The road shown in the viewport while it is not generated (a bent mesh, a grid mesh
+	// or decals): made anew when the road changes, hidden when its pieces are up to date.
 	void update_preview();
+	void hide_preview();
 	void remove_preview();
 	// The pieces were generated for the road as it is now.
 	bool is_up_to_date() const;
@@ -505,8 +556,12 @@ private:
 	// that could not be.
 	QHash<QString, BendSource> bend_sources_;
 	QHash<QString, QString> bend_errors_;
+	// The preview of a bent or a grid mesh; of decals, one decal per piece.
 	Unigine::ObjectMeshDynamicPtr preview_;
-	// The preview is made anew only when the copies change.
+	QVector<Unigine::DecalMeshPtr> decal_previews_;
+	// What grid each decal of the preview was given (see update_preview()).
+	QVector<QByteArray> decal_preview_hashes_;
+	// The preview is made anew only when the road changes.
 	bool preview_dirty_{false};
 	bool hide_outdated_{true};
 	// The pieces hidden by update_hidden_pieces(), by ID.
@@ -537,7 +592,6 @@ private:
 	int removed_root_frames_{0};
 
 	Unigine::EventConnections connections_;
-	Unigine::Visualizer::MODE saved_visualizer_mode_{Unigine::Visualizer::MODE_DISABLED};
 };
 
 } // namespace ArtistTool

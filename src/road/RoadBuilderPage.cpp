@@ -201,11 +201,8 @@ void RoadBuilderPage::build_ui()
 	layout->addWidget(description);
 
 	layout->addWidget(build_road_group());
+	// Texture, Vertex Color and Result are inside it.
 	layout->addWidget(build_shape_group());
-	QWidget *texture_group = build_texture_group();
-	grid_only_widgets_ << texture_group;
-	layout->addWidget(texture_group);
-	layout->addWidget(build_output_group());
 
 	// What is drawn over the road: the grid, the curve alone, or the vertex colors.
 	const QString view_tooltip = loc_.tip(
@@ -213,11 +210,15 @@ void RoadBuilderPage::build_ui()
 		"Grid - the grid the mesh is going to have: the edges of the road, its rows and "
 		"strips, the joints of the pieces.\n"
 		"Curve Only - the curve and its points; the grid is still built and Generate makes "
-		"the same mesh.",
+		"the same mesh.\n"
+		"Vertex Color R / G / B - the road filled with that channel (white - 1, black - 0); "
+		"RGB - with all three.",
 		"Что рисуется поверх дороги во вьюпорте.\n"
 		"[[Grid|Сетка]] - сетка будущего меша: края дороги, ряды и полосы, стыки кусков.\n"
 		"[[Curve Only|Только кривая]] - кривая и точки; сетка всё равно строится, и "
-		"«Сгенерировать» делает тот же меш.");
+		"«Сгенерировать» делает тот же меш.\n"
+		"[[Vertex Color R / G / B|Цвет вершин R / G / B]] - дорога залита этим каналом (белый - 1, "
+		"чёрный - 0); RGB - всеми тремя.");
 	QHBoxLayout *view_row = new QHBoxLayout;
 	QLabel *view_label = new QLabel(uiText("In the viewport", "Во вьюпорте"));
 	view_label->setToolTip(view_tooltip);
@@ -225,12 +226,18 @@ void RoadBuilderPage::build_ui()
 	view_ = new QComboBox;
 	view_->addItem(uiText("Grid", "Сетка"), int(ROAD_VIEW_GRID));
 	view_->addItem(uiText("Curve Only", "Только кривая"), int(ROAD_VIEW_CURVE));
+	// The vertex colors are added while the road has them, see refresh_view_items().
 	view_->setToolTip(view_tooltip);
 	view_->setFocusPolicy(Qt::StrongFocus);
 	view_->installEventFilter(this);
 	view_row->addWidget(view_);
+	view_row->addSpacing(12);
+	// Made in build_shape_group().
+	view_row->addWidget(hide_outdated_);
 	view_row->addStretch(1);
 	connect(view_, &QComboBox::currentIndexChanged, this, [this](int) {
+		if (!view_items_changing_)
+			wanted_view_ = view_->currentData().toInt();
 		builder_->setView(RoadView(view_->currentData().toInt()));
 	});
 	layout->addLayout(view_row);
@@ -735,12 +742,25 @@ QWidget *RoadBuilderPage::build_shape_group()
 	const QString reset_tooltip = loc_.tip("Reset to default", "Сбросить на значение по умолчанию");
 
 	// Two short fields in a row: label, field, reset button on the left half and the
-	// same on the right one. A long field takes the whole row.
+	// same on the right one. The main fields on top, the rest folded under "More", in
+	// the same two columns (see arrange_shape()).
 	QGroupBox *group = new QGroupBox(uiText("Shape", "Форма"));
-	QGridLayout *layout = new QGridLayout(group);
-	layout->setColumnStretch(1, 1);
-	layout->setColumnStretch(4, 1);
+	QVBoxLayout *group_layout = new QVBoxLayout(group);
+	QGridLayout *layout = new QGridLayout;
+	group_layout->addLayout(layout);
 	shape_layout_ = layout;
+	QWidget *more = new QWidget;
+	shape_more_layout_ = new QGridLayout(more);
+	shape_more_layout_->setContentsMargins(0, 0, 0, 0);
+	for (QGridLayout *grid : {shape_layout_, shape_more_layout_})
+	{
+		grid->setColumnStretch(1, 1);
+		grid->setColumnStretch(4, 1);
+	}
+	shape_more_header_ = makeSectionHeader(uiText("Advanced Settings", "Дополнительные настройки"), more);
+	shape_more_header_->setToolTip(loc_.tip("The other settings of the shape.", "Остальные настройки формы."));
+	group_layout->addWidget(shape_more_header_);
+	group_layout->addWidget(more);
 
 	const auto add_field = [&](int row, int side, const QString &label_text, QWidget *field, const QString &tooltip,
 		const std::function<void()> &reset, int field_span = 1) {
@@ -818,20 +838,17 @@ QWidget *RoadBuilderPage::build_shape_group()
 	hide_outdated_->setChecked(true);
 	hide_outdated_->setToolTip(loc_.tip(
 		"On: while the curve or the settings differ from those the mesh of the road was "
-		"generated for, its pieces are hidden, so the old mesh does not overlap the grid or "
-		"the preview of the new one. They come back after Generate, when the road is put "
+		"generated for, its pieces are hidden, so the old mesh does not overlap the preview "
+		"of the new one. They come back after Generate, when the road is put "
 		"back as it was (Ctrl+Z), when the tool is off and while the world is saved.\n"
 		"Off: the old mesh stays seen.",
 		"Вкл: пока кривая или настройки отличаются от тех, для которых меш дороги был "
-		"сгенерирован, его куски спрятаны - старый меш не наслаивается на сетку и превью "
-		"нового. Они возвращаются после «Сгенерировать», когда дорогу вернули как было "
-		"(Ctrl+Z), когда инструмент выключен и пока мир сохраняется.\n"
+		"сгенерирован, его куски спрятаны - старый меш не наслаивается на превью нового. "
+		"Они возвращаются после «Сгенерировать», когда дорогу вернули как было (Ctrl+Z), "
+		"когда инструмент выключен и пока мир сохраняется.\n"
 		"Выкл: старый меш остаётся видимым."));
 	connect(hide_outdated_, &QCheckBox::toggled, this, [this](bool checked) { builder_->setHideOutdated(checked); });
-	// At the top of the left column, in the place of Width: a bent mesh has no Width.
-	layout->addWidget(hide_outdated_, 0, 0, 1, 3);
-	// Only a bent mesh has a preview the old pieces would overlap.
-	bend_rows_ << hide_outdated_;
+	// Every kind of road has a preview: the checkbox is in the row of "In the viewport".
 
 	bend_merge_ = new QCheckBox(uiText("Merge Surfaces By Material", "Объединять поверхности по материалу"));
 	bend_merge_->setToolTip(loc_.tip(
@@ -879,6 +896,7 @@ QWidget *RoadBuilderPage::build_shape_group()
 	layout->addWidget(bend_mesh_angle_, 2, 4);
 	layout->addWidget(mesh_angle_reset, 2, 5);
 	bend_rows_ << mesh_angle_label << bend_mesh_angle_ << mesh_angle_reset;
+	shape_fields_.insert(bend_mesh_angle_, {mesh_angle_label, bend_mesh_angle_, mesh_angle_reset});
 	connect(bend_mesh_angle_, &QDoubleSpinBox::valueChanged, this, [this](double) {
 		if (updating_)
 			return;
@@ -902,7 +920,7 @@ QWidget *RoadBuilderPage::build_shape_group()
 	piece_length_ = make_spin_box(0.0, 100000.0, 1.0, 1, piece_tooltip);
 	// Under Step Along, on the left of Roll.
 	add_field(3, 0, uiText("Max Piece Length", "Макс. длина куска"), piece_length_, piece_tooltip,
-		[this, defaults]() { piece_length_->setValue(defaults.piece_length); });
+		[this]() { piece_length_->setValue(RoadBuilder::defaultPieceLength(builder_->getSettings().output)); });
 
 
 	const QString angle_tooltip = loc_.tip(
@@ -940,6 +958,14 @@ QWidget *RoadBuilderPage::build_shape_group()
 		connect(box, &QDoubleSpinBox::valueChanged, this, [this](double) { apply_settings(); });
 	connect(columns_, &QSpinBox::valueChanged, this, [this](int) { apply_settings(); });
 
+	// The texture, the vertex colors (not of a bent mesh) and what is made, frames inside Shape.
+	QWidget *texture_group = build_texture_group();
+	grid_only_widgets_ << texture_group;
+	group_layout->addWidget(texture_group);
+	QWidget *color_group = build_color_group();
+	grid_only_widgets_ << color_group;
+	group_layout->addWidget(color_group);
+	group_layout->addWidget(build_output_group());
 	return group;
 }
 
@@ -1003,18 +1029,7 @@ QWidget *RoadBuilderPage::build_ground_block()
 		"редактирование быстрое. Если изменилась сама земля (подправили террейн, сдвинули "
 		"объекты), нажмите эту кнопку.\n"
 		"[[Generate|«Сгенерировать»]] всегда измеряет всю дорогу заново."));
-	// At the right end of the row, next to the reset button.
-	snap_row->addStretch(1);
-	snap_row->addWidget(refresh_ground_);
-	layout->addLayout(snap_row, row, 0, 1, 2);
-	QToolButton *snap_reset = makeResetButton(reset_tooltip, this, [this, defaults]() {
-		snap_to_ground_->setChecked(defaults.snap_to_ground);
-	});
-	layout->addWidget(snap_reset, row, 2);
-	grid_only_widgets_ << snap_to_ground_ << refresh_ground_ << snap_reset;
-	++row;
-
-	// A setting of the page, not of a road: how the editing feels.
+	// A setting of the page, not of a road: how the editing feels. In the same row.
 	snap_after_release_ = new QCheckBox(uiText("Snap After Release", "Прижимать после отпускания"));
 	snap_after_release_->setToolTip(loc_.tip(
 		"On: while a point is dragged (or anything is changed with the mouse button held), "
@@ -1025,10 +1040,19 @@ QWidget *RoadBuilderPage::build_ground_block()
 		"на высоте кривой и ложится на землю, когда кнопку отпускают. Самый быстрый способ "
 		"править длинную дорогу в тяжёлой сцене.\n"
 		"Выкл: дорога всё время лежит на земле."));
-	layout->addWidget(snap_after_release_, row, 0, 1, 2);
-	QToolButton *after_release_reset = makeResetButton(reset_tooltip, this, [this]() { snap_after_release_->setChecked(false); });
-	layout->addWidget(after_release_reset, row, 2);
-	grid_only_widgets_ << snap_after_release_ << after_release_reset;
+	snap_row->addSpacing(12);
+	snap_row->addWidget(snap_after_release_);
+	// At the right end of the row, next to the reset button.
+	snap_row->addStretch(1);
+	snap_row->addWidget(refresh_ground_);
+	layout->addLayout(snap_row, row, 0, 1, 2);
+	// Snap To Ground only: Snap After Release is how the user likes to edit, not a setting
+	// of the road.
+	QToolButton *snap_reset = makeResetButton(reset_tooltip, this, [this, defaults]() {
+		snap_to_ground_->setChecked(defaults.snap_to_ground);
+	});
+	layout->addWidget(snap_reset, row, 2);
+	grid_only_widgets_ << snap_to_ground_ << snap_after_release_ << refresh_ground_ << snap_reset;
 	++row;
 	connect(refresh_ground_, &QPushButton::clicked, this, [this]() {
 		message_.clear();
@@ -1036,25 +1060,6 @@ QWidget *RoadBuilderPage::build_ground_block()
 	});
 	connect(snap_after_release_, &QCheckBox::toggled, this, [this](bool checked) { builder_->setSnapAfterRelease(checked); });
 
-	const QString offset_tooltip = loc_.tip(
-		"How far above the surface the road is put, in units: a little lift keeps the "
-		"ground from showing through it.",
-		"На сколько дорога приподнята над поверхностью, в юнитах: небольшой подъём не даёт "
-		"земле просвечивать сквозь неё.");
-	ground_offset_ = make_spin_box(-1000.0, 1000.0, 0.01, 3, offset_tooltip);
-	// In the row of Snap To Ground, between it and Recompute.
-	QLabel *offset_label = new QLabel(uiText("Offset From Surface", "Отступ от поверхности"));
-	offset_label->setToolTip(offset_tooltip);
-	offset_label->setContentsMargins(8, 0, 0, 0);
-	QToolButton *offset_reset = makeResetButton(reset_tooltip, this, [this, defaults]() {
-		ground_offset_->setValue(defaults.ground_offset);
-	});
-	snap_row->insertWidget(1, offset_label);
-	snap_row->insertWidget(2, ground_offset_, 1);
-	snap_row->insertWidget(3, offset_reset);
-	ground_offset_row_[0] = offset_label;
-	ground_offset_row_[1] = ground_offset_;
-	ground_offset_row_[2] = offset_reset;
 
 	// The same filter as "Place on" of the Object Placer, but what it leaves out is
 	// looked through: the road goes onto the terrain under the rocks, not over them.
@@ -1063,11 +1068,13 @@ QWidget *RoadBuilderPage::build_ground_block()
 		"What the road and its points are laid on. The unchecked kinds of objects are "
 		"looked through: e.g. with only Terrain checked the road lies on the terrain and "
 		"goes under the rocks and the buildings standing on it, and a click on a rock "
-		"puts a point onto the terrain under it.",
+		"puts a point onto the terrain under it.\n"
+		"Clutters and clusters (grass, trees) make laying the road on the ground very slow.",
 		"На что ложится дорога и ставятся её точки. Неотмеченные типы объектов "
 		"пропускаются насквозь: например, если отмечен только Terrain, дорога ложится на "
 		"террейн и проходит под камнями и домами, стоящими на нём, а клик по камню ставит "
-		"точку на террейн под ним.");
+		"точку на террейн под ним.\n"
+		"Клаттеры и кластеры (трава, деревья) сильно замедляют прилипание к земле.");
 	filter_texts.only_immovable = uiText("Only On Immovable Nodes", "Только на ноды с флагом Immovable");
 	filter_texts.only_immovable_tooltip = loc_.tip(
 		"Lay the road only on nodes that have the Immovable flag enabled.",
@@ -1087,7 +1094,6 @@ QWidget *RoadBuilderPage::build_ground_block()
 	++row;
 	ground_filter_->on_changed = [this]() { apply_settings(); };
 
-	connect(ground_offset_, &QDoubleSpinBox::valueChanged, this, [this](double) { apply_settings(); });
 	connect(snap_to_ground_, &QCheckBox::toggled, this, [this](bool) { apply_settings(); });
 
 	return block;
@@ -1179,6 +1185,113 @@ QWidget *RoadBuilderPage::build_texture_group()
 		apply_settings();
 	});
 
+	return group;
+}
+
+QWidget *RoadBuilderPage::build_color_group()
+{
+	const RoadSettings defaults;
+	const QString reset_tooltip = loc_.tip("Reset to default", "Сбросить на значение по умолчанию");
+
+	QGroupBox *group = new QGroupBox(uiText("Vertex Color", "Цвет вершин"));
+	QVBoxLayout *group_layout = new QVBoxLayout(group);
+
+	vertex_colors_ = new QCheckBox(uiText("Write Vertex Colors", "Записывать цвет вершин"));
+	vertex_colors_->setToolTip(loc_.tip(
+		"Masks in the vertex colors of the road for its material. Off - every vertex is white.",
+		"Маски в цвете вершин дороги для её материала. Выкл - все вершины белые."));
+	group_layout->addWidget(vertex_colors_);
+
+	// A row per channel: its letter in the color of its axis, as in the Object Placer,
+	// then up to three fields (label, field, reset button), the fields sharing the
+	// width there is.
+	color_rows_ = new QWidget;
+	QGridLayout *layout = new QGridLayout(color_rows_);
+	layout->setContentsMargins(0, 0, 0, 0);
+	for (int slot = 0; slot < 3; ++slot)
+		layout->setColumnStretch(2 + slot * 3, 1);
+	group_layout->addWidget(color_rows_);
+
+	const auto add_channel = [&](int axis, const QString &letter) {
+		QLabel *label = new QLabel(letter);
+		label->setStyleSheet(QString::fromUtf8("QLabel { color: %1; font-weight: bold; }").arg(axisColor(axis)));
+		layout->addWidget(label, axis, 0);
+		return axis;
+	};
+	// A field alone in its row takes the room of all three.
+	const auto add_field = [&](int row, int slot, const QString &label_text, QDoubleSpinBox *field,
+		const std::function<void()> &reset, int taken = 1) {
+		QLabel *label = new QLabel(label_text);
+		label->setToolTip(field->toolTip());
+		if (slot > 0)
+			label->setContentsMargins(8, 0, 0, 0);
+		layout->addWidget(label, row, 1 + slot * 3);
+		layout->addWidget(field, row, 2 + slot * 3, 1, taken * 3 - 2);
+		layout->addWidget(makeResetButton(reset_tooltip, this, reset), row, (slot + taken) * 3);
+	};
+
+	const int red_row = add_channel(0, QString::fromUtf8("R"));
+	color_edge_ = make_spin_box(0.0, 1000.0, 0.1, 2, loc_.tip(
+		"How wide the fade from 0 at each edge of the road to 1 is, in units. 0 - no fade at the edges.",
+		"Ширина перехода от 0 на каждом краю дороги к 1, в юнитах. 0 - без перехода по краям."));
+	add_field(red_row, 0, uiText("Edge", "Край"), color_edge_, [this, defaults]() { color_edge_->setValue(defaults.color_edge); });
+	color_start_fade_ = make_spin_box(0.0, 100000.0, 0.5, 2, loc_.tip(
+		"How long the fade from 0 at the start of the road is, in units. 0 - none.",
+		"Длина перехода от 0 в начале дороги, в юнитах. 0 - без перехода."));
+	add_field(red_row, 1, uiText("Start", "Начало"), color_start_fade_,
+		[this, defaults]() { color_start_fade_->setValue(defaults.color_start_fade); });
+	color_end_fade_ = make_spin_box(0.0, 100000.0, 0.5, 2, loc_.tip(
+		"How long the fade to 0 at the end of the road is, in units. 0 - none.",
+		"Длина перехода к 0 в конце дороги, в юнитах. 0 - без перехода."));
+	add_field(red_row, 2, uiText("End", "Конец"), color_end_fade_, [this, defaults]() { color_end_fade_->setValue(defaults.color_end_fade); });
+
+	const int green_row = add_channel(1, QString::fromUtf8("G"));
+	const QString green_tooltip = loc_.tip(
+		"A smooth gradient between the points of the curve.\n"
+		"Point To Point - 1 at the first point, 0 at the next one, 1 at the one after it...\n"
+		"To Middle - 1 at every point, 0 halfway between two points.",
+		"Плавный градиент между точками кривой.\n"
+		"[[Point To Point|От точки к точке]] - 1 в первой точке, 0 в следующей, 1 в третьей...\n"
+		"[[To Middle|К середине]] - 1 в каждой точке, 0 посередине между точками.");
+	QLabel *green_label = new QLabel(uiText("Gradient", "Градиент"));
+	green_label->setToolTip(green_tooltip);
+	layout->addWidget(green_label, green_row, 1);
+	QHBoxLayout *green_buttons = new QHBoxLayout;
+	color_green_ = new QButtonGroup(this);
+	const QString green_names[] = {uiText("Point To Point", "От точки к точке"), uiText("To Middle", "К середине")};
+	for (int id = ROAD_GREEN_POINT_TO_POINT; id <= ROAD_GREEN_TO_MIDDLE; ++id)
+	{
+		QToolButton *button = new QToolButton;
+		button->setText(green_names[id]);
+		button->setCheckable(true);
+		button->setFocusPolicy(Qt::NoFocus);
+		button->setToolTip(green_tooltip);
+		// As low as the number fields.
+		button->setStyleSheet(choiceButtonStyle() + QString::fromUtf8("QToolButton { padding: 1px 8px; }"));
+		button->setFixedHeight(20);
+		color_green_->addButton(button, id);
+		green_buttons->addWidget(button);
+	}
+	green_buttons->addStretch(1);
+	layout->addLayout(green_buttons, green_row, 2, 1, 8);
+
+	const int blue_row = add_channel(2, QString::fromUtf8("B"));
+	color_noise_size_ = make_spin_box(0.0, 10000.0, 0.5, 2, loc_.tip(
+		"A random value at every vertex. Size - how big the spots of the noise are, in units: "
+		"vertices closer than that get close values. 0 - every vertex its own.",
+		"Случайное значение в каждой вершине. Размер - насколько крупные пятна шума, в юнитах: "
+		"вершины ближе этого получают близкие значения. 0 - у каждой вершины своё."));
+	add_field(blue_row, 0, uiText("Noise Size", "Размер шума"), color_noise_size_,
+		[this, defaults]() { color_noise_size_->setValue(defaults.color_noise_size); }, 3);
+
+	connect(vertex_colors_, &QCheckBox::toggled, this, [this](bool checked) {
+		color_rows_->setVisible(checked);
+		apply_settings();
+	});
+	for (QDoubleSpinBox *box : {color_edge_, color_start_fade_, color_end_fade_, color_noise_size_})
+		connect(box, &QDoubleSpinBox::valueChanged, this, [this](double) { apply_settings(); });
+	connect(color_green_, &QButtonGroup::idClicked, this, [this](int) { apply_settings(); });
+	color_rows_->setVisible(false);
 	return group;
 }
 
@@ -1569,28 +1682,57 @@ void RoadBuilderPage::arrange_shape(bool bent)
 		return;
 	shape_bent_ = int(bent);
 
-	const auto place = [this](QWidget *field, int row, int side) {
+	// A field with its label and reset button, into the main grid or into the one under
+	// "More".
+	const auto place = [this](QWidget *field, QGridLayout *layout, int row, int side) {
 		const QVector<QWidget *> widgets = shape_fields_.value(field);
 		if (widgets.size() != 3)
 			return;
 		for (QWidget *widget : widgets)
+		{
 			shape_layout_->removeWidget(widget);
+			shape_more_layout_->removeWidget(widget);
+		}
 		widgets[0]->setContentsMargins(side == 1 ? 8 : 0, 0, 0, 0);
-		shape_layout_->addWidget(widgets[0], row, side * 3);
-		shape_layout_->addWidget(widgets[1], row, side * 3 + 1);
-		shape_layout_->addWidget(widgets[2], row, side * 3 + 2);
+		layout->addWidget(widgets[0], row, side * 3);
+		layout->addWidget(widgets[1], row, side * 3 + 1);
+		layout->addWidget(widgets[2], row, side * 3 + 2);
 	};
+	shape_layout_->removeWidget(bend_merge_);
 	if (bent)
 	{
-		// Next to the two checkboxes, then the length of the pieces under them.
-		place(side_offset_, 0, 1);
-		place(road_roll_, 1, 1);
-		place(piece_length_, 2, 0);
+		// What a bent mesh has of its own on top, the rest under "More".
+		place(side_offset_, shape_layout_, 0, 0);
+		place(bend_mesh_angle_, shape_layout_, 0, 1);
+		shape_layout_->addWidget(bend_merge_, 1, 0, 1, 6);
+		place(piece_length_, shape_more_layout_, 0, 0);
+		place(road_roll_, shape_more_layout_, 0, 1);
 	} else
 	{
-		place(side_offset_, 2, 1);
-		place(road_roll_, 3, 1);
-		place(piece_length_, 3, 0);
+		place(width_, shape_layout_, 0, 0);
+		place(columns_, shape_layout_, 0, 1);
+		place(step_, shape_layout_, 1, 0);
+		place(side_offset_, shape_layout_, 1, 1);
+		place(max_angle_, shape_more_layout_, 0, 0);
+		place(inner_round_, shape_more_layout_, 0, 1);
+		place(piece_length_, shape_more_layout_, 1, 0);
+		place(road_roll_, shape_more_layout_, 1, 1);
+		// Hidden for a grid.
+		place(bend_mesh_angle_, shape_layout_, 2, 1);
+		shape_layout_->addWidget(bend_merge_, 3, 0, 1, 6);
+	}
+
+	// The labels of the two grids as wide, so that their fields stand one under another.
+	int label_width = 0;
+	for (const QVector<QWidget *> &widgets : std::as_const(shape_fields_))
+	{
+		if (!widgets.isEmpty())
+			label_width = qMax(label_width, widgets[0]->sizeHint().width());
+	}
+	for (QGridLayout *grid : {shape_layout_, shape_more_layout_})
+	{
+		grid->setColumnMinimumWidth(0, label_width);
+		grid->setColumnMinimumWidth(3, label_width);
 	}
 }
 
@@ -1720,16 +1862,23 @@ QWidget *RoadBuilderPage::build_output_group()
 	add_pair_row(1, uiText("Fade Distance", "Затухание"), decal_fade_distance_, fade_tooltip,
 		[this, defaults]() { decal_fade_distance_->setValue(defaults.decal_fade_distance); }, nullptr);
 
-	// What only a decal has.
+	// A mesh on the ground and a decal: each has a lift of its own, in the same field.
 	const QString lift_tooltip = loc_.tip(
-		"How high above the ground the decal mesh is put, in units: the ground that bulges above "
-		"the mesh between its vertices still gets the road. Too high - it falls on kerbs and stones "
-		"too.",
-		"На сколько меш декали приподнят над землёй, в юнитах: земля, выпирающая над мешем между "
-		"вершинами, всё равно получает дорогу. Слишком высоко - дорога ляжет и на бордюры и камни.");
-	decal_lift_ = make_spin_box(0.0, 100.0, 0.05, 2, lift_tooltip);
+		"How high above the ground the road is put, in units.\n"
+		"Mesh - a little lift keeps the ground from showing through it; also off the ground, at "
+		"the height of the curve (its points lie on the ground).\n"
+		"Decal - the ground that bulges above the decal mesh between its vertices still gets the "
+		"road. Too high - it falls on kerbs and stones too.",
+		"На сколько дорога приподнята над землёй, в юнитах.\n"
+		"[[Mesh|Меш]] - небольшой подъём не даёт земле просвечивать сквозь неё; и без прижатия "
+		"к земле, на высоте кривой (её точки лежат на земле).\n"
+		"[[Decal|Декаль]] - земля, выпирающая над мешем декали между вершинами, всё равно "
+		"получает дорогу. Слишком высоко - дорога ляжет и на бордюры и камни.");
+	decal_lift_ = make_spin_box(-100.0, 100.0, 0.01, 2, lift_tooltip);
 	add_pair_row(0, uiText("Lift Above Ground", "Подъём над землёй"), decal_lift_, lift_tooltip,
-		[this, defaults]() { decal_lift_->setValue(defaults.decal_lift); }, &decal_rows_);
+		[this, defaults]() {
+			decal_lift_->setValue(builder_->getSettings().output == ROAD_OUTPUT_DECAL ? defaults.decal_lift : defaults.ground_offset);
+		}, &lift_row_);
 
 	const QString depth_tooltip = loc_.tip(
 		"How deep the decal is projected down from its mesh, in units. Too deep - the road also "
@@ -1760,7 +1909,11 @@ QWidget *RoadBuilderPage::build_output_group()
 	material_options.dialog_title = uiText("Material of the road", "Материал дороги");
 	material_options.filter = QString::fromUtf8(".mat");
 	material_options.icon = QString::fromUtf8(":/images/assets/file_material.png");
-	material_options.reset_tooltip = loc_.tip("Back to the base material.", "Вернуть базовый материал.");
+	material_options.reset_tooltip = loc_.tip(
+		"Back to the default material: road_mesh for a mesh, road_decal for decals (mesh_base or "
+		"decal_base if they are gone from the project).",
+		"Вернуть материал по умолчанию: road_mesh для меша, road_decal для декалей (mesh_base или "
+		"decal_base, если их нет в проекте).");
 	material_options.show_tooltip = loc_.tip("Show the material in the Asset Browser.", "Показать материал в Asset Browser.");
 	material_options.take_text = uiText("Use Selected", "Взять выделенный");
 	material_options.take_tooltip = loc_.tip("Take the material selected in the Asset Browser.",
@@ -1839,7 +1992,7 @@ void RoadBuilderPage::load_settings()
 	// is carried over from one project to another. Earlier builds kept the ones used
 	// last here; they are dropped.
 	const QStringList conveniences = {QString::fromUtf8("hotkeys_expanded"), QString::fromUtf8("snap_after_release"),
-		QString::fromUtf8("view"), QString::fromUtf8("hide_outdated")};
+		QString::fromUtf8("view"), QString::fromUtf8("hide_outdated"), QString::fromUtf8("shape_more_expanded")};
 	// "Show Grid" of the builds before 1.3 is "In the viewport" now.
 	if (settings.contains("show_grid") && !settings.contains("view"))
 		settings.setValue("view", settings.value("show_grid").toBool() ? int(ROAD_VIEW_GRID) : int(ROAD_VIEW_CURVE));
@@ -1850,9 +2003,16 @@ void RoadBuilderPage::load_settings()
 	}
 
 	hotkeys_header_->setChecked(settings.value("hotkeys_expanded", true).toBool());
+	shape_more_header_->setChecked(settings.value("shape_more_expanded", false).toBool());
 	snap_after_release_->setChecked(settings.value("snap_after_release", false).toBool());
-	const int view = view_->findData(settings.value("view", int(ROAD_VIEW_GRID)).toInt());
-	view_->setCurrentIndex(view >= 0 ? view : 0);
+	// A vertex color view is kept until a road with the colors shows it.
+	wanted_view_ = settings.value("view", int(ROAD_VIEW_GRID)).toInt();
+	const int view = view_->findData(wanted_view_);
+	{
+		const int wanted = wanted_view_;
+		view_->setCurrentIndex(view >= 0 ? view : 0);
+		wanted_view_ = wanted;
+	}
 	hide_outdated_->setChecked(settings.value("hide_outdated", true).toBool());
 	builder_->setHideOutdated(hide_outdated_->isChecked());
 }
@@ -1863,8 +2023,10 @@ void RoadBuilderPage::resetSettings()
 	settings.remove(QString::fromUtf8(SETTINGS_GROUP));
 
 	hotkeys_header_->setChecked(true);
+	shape_more_header_->setChecked(false);
 	snap_after_release_->setChecked(false);
 	view_->setCurrentIndex(0);
+	wanted_view_ = int(ROAD_VIEW_GRID);
 	hide_outdated_->setChecked(true);
 }
 
@@ -1873,8 +2035,9 @@ void RoadBuilderPage::save_settings() const
 	QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
 	settings.beginGroup(SETTINGS_GROUP);
 	settings.setValue("hotkeys_expanded", hotkeys_header_->isChecked());
+	settings.setValue("shape_more_expanded", shape_more_header_->isChecked());
 	settings.setValue("snap_after_release", snap_after_release_->isChecked());
-	settings.setValue("view", view_->currentData().toInt());
+	settings.setValue("view", wanted_view_);
 	settings.setValue("hide_outdated", hide_outdated_->isChecked());
 }
 
@@ -1898,13 +2061,23 @@ RoadSettings RoadBuilderPage::read_settings() const
 	settings.ground = ground_filter_->getFilter();
 	settings.closed = closed_->isChecked();
 	settings.snap_to_ground = snap_to_ground_->isChecked();
-	settings.ground_offset = field_value(ground_offset_, current.ground_offset);
 	settings.uv_length = field_value(uv_length_, current.uv_length);
 	settings.uv_width = field_value(uv_width_, current.uv_width);
 	settings.uv_rotation = float(uv_rotation_->value());
+	settings.vertex_colors = vertex_colors_->isChecked();
+	settings.color_edge = field_value(color_edge_, current.color_edge);
+	settings.color_start_fade = field_value(color_start_fade_, current.color_start_fade);
+	settings.color_end_fade = field_value(color_end_fade_, current.color_end_fade);
+	settings.color_green = RoadGreenMode(qBound(int(ROAD_GREEN_POINT_TO_POINT), color_green_->checkedId(), int(ROAD_GREEN_TO_MIDDLE)));
+	settings.color_noise_size = field_value(color_noise_size_, current.color_noise_size);
 	settings.output = RoadOutput(qBound(int(ROAD_OUTPUT_MESH), output_->checkedId(), int(ROAD_OUTPUT_BENT)));
 	settings.decal_depth = field_value(decal_depth_, current.decal_depth);
-	settings.decal_lift = field_value(decal_lift_, current.decal_lift);
+	// The field shows the lift of the output the road has had so far (it may be switched
+	// right now).
+	if (current.output == ROAD_OUTPUT_DECAL)
+		settings.decal_lift = field_value(decal_lift_, current.decal_lift);
+	else
+		settings.ground_offset = field_value(decal_lift_, current.ground_offset);
 	settings.decal_visible_distance = field_value(decal_visible_distance_, current.decal_visible_distance);
 	settings.decal_fade_distance = field_value(decal_fade_distance_, current.decal_fade_distance);
 	settings.piece_length = field_value(piece_length_, current.piece_length);
@@ -1944,16 +2117,31 @@ void RoadBuilderPage::refresh()
 	closed_->setChecked(settings.closed);
 	snap_to_ground_->setChecked(settings.snap_to_ground);
 	refresh_ground_->setEnabled(settings.snap_to_ground);
-	show_value(ground_offset_, settings.ground_offset);
 	show_value(uv_length_, settings.uv_length);
 	show_value(uv_width_, settings.uv_width);
 	if (!uv_rotation_->isSliderDown())
 		uv_rotation_->setValue(qRound(settings.uv_rotation));
 	uv_rotation_value_->setText(QString::fromUtf8("%1°").arg(uv_rotation_->value()));
+	vertex_colors_->setChecked(settings.vertex_colors);
+	color_rows_->setVisible(settings.vertex_colors);
+	show_value(color_edge_, settings.color_edge);
+	show_value(color_start_fade_, settings.color_start_fade);
+	show_value(color_end_fade_, settings.color_end_fade);
+	if (QAbstractButton *button = color_green_->button(settings.color_green))
+		button->setChecked(true);
+	show_value(color_noise_size_, settings.color_noise_size);
 	if (QAbstractButton *button = output_->button(settings.output))
 		button->setChecked(true);
 	show_value(decal_depth_, settings.decal_depth);
-	show_value(decal_lift_, settings.decal_lift);
+	// The field is of the output shown: switched to another one, it gets that one's lift
+	// even while it is being typed in (else it would be written into the other output).
+	const float lift = settings.output == ROAD_OUTPUT_DECAL ? settings.decal_lift : settings.ground_offset;
+	if (int(settings.output) != lift_output_)
+	{
+		lift_output_ = int(settings.output);
+		decal_lift_->setValue(lift);
+	} else
+		show_value(decal_lift_, lift);
 	show_value(decal_visible_distance_, settings.decal_visible_distance);
 	show_value(decal_fade_distance_, settings.decal_fade_distance);
 	show_value(piece_length_, settings.piece_length);
@@ -1967,14 +2155,16 @@ void RoadBuilderPage::refresh()
 	add_points_button_->setChecked(builder_->isAddingPoints());
 	updating_ = false;
 
-	// A decal has a lift of its own instead of the offset. A bent mesh follows the
-	// curve: no grid, no ground, the materials of its asset.
+	// A bent mesh follows the curve: no grid, no ground, the materials of its asset.
 	const bool bent = settings.output == ROAD_OUTPUT_BENT;
 	arrange_shape(bent);
+	refresh_view_items(settings.vertex_colors && !bent);
 	for (QWidget *widget : grid_only_widgets_)
 		widget->setVisible(!bent);
-	for (QWidget *widget : ground_offset_row_)
-		widget->setVisible(settings.snap_to_ground && !decal && !bent);
+	for (QWidget *widget : lift_row_)
+		widget->setVisible(!bent);
+	// A mesh may be sunk into the ground, a decal is only lifted (see limited()).
+	decal_lift_->setMinimum(decal ? 0.0 : -100.0);
 	for (QWidget *widget : decal_rows_)
 		widget->setVisible(decal);
 	for (QWidget *widget : material_rows_)
@@ -1986,9 +2176,11 @@ void RoadBuilderPage::refresh()
 		has_pattern = has_pattern || part.role == ROAD_BEND_PATTERN;
 
 	const QString material = builder_->getMaterialName();
-	material_field_->setValue(material.isEmpty()
-		? (decal ? QString::fromUtf8("decal_base") : QString::fromUtf8("mesh_base")) : material, !material.isEmpty());
-	material_field_->setShowEnabled(!settings.material.isEmpty());
+	const QString default_material = builder_->getDefaultMaterialName();
+	material_field_->setValue(material.isEmpty() ? default_material : material, !material.isEmpty());
+	// The default one is shown in the Asset Browser too, if it is a file of the project.
+	material_field_->setShowEnabled(!settings.material.isEmpty()
+		|| (default_material != QLatin1String("mesh_base") && default_material != QLatin1String("decal_base")));
 
 	folder_field_->setValue(builder_->getFolder(), !settings.folder.isEmpty());
 	folder_field_->setShowEnabled(builder_->hasGeneratedFiles());
@@ -2061,7 +2253,8 @@ void RoadBuilderPage::refresh()
 	{
 		stats_label_->setText(uiText("Grid: %1 rows along, %2 strips across, %3 triangles, %4 pieces.",
 			"Сетка: рядов вдоль - %1, полос поперёк - %2, треугольников - %3, кусков - %4.")
-			.arg(grid.stations - 1).arg(grid.columns).arg(grid.numTriangles()).arg(grid.piece_starts.size()));
+			// The strips set in the field: the columns added for the vertex colors are not counted.
+			.arg(grid.stations - 1).arg(settings.columns).arg(grid.numTriangles()).arg(grid.piece_starts.size()));
 		if (settings.snap_to_ground)
 		{
 			stats_label_->setText(stats_label_->text() + QString::fromUtf8("\n") + (builder_->isGroundFromTerrain()
@@ -2096,6 +2289,34 @@ void RoadBuilderPage::refresh()
 	if (!message_.isEmpty())
 		status += (status.isEmpty() ? QString() : QString::fromUtf8("\n")) + message_;
 	status_label_->setText(status);
+}
+
+void RoadBuilderPage::refresh_view_items(bool colors)
+{
+	const bool has_colors = view_->findData(int(ROAD_VIEW_COLOR_R)) >= 0;
+	if (has_colors == colors)
+		return;
+
+	view_items_changing_ = true;
+	if (colors)
+	{
+		view_->addItem(uiText("Vertex Color R", "Цвет вершин R"), int(ROAD_VIEW_COLOR_R));
+		view_->addItem(uiText("Vertex Color G", "Цвет вершин G"), int(ROAD_VIEW_COLOR_G));
+		view_->addItem(uiText("Vertex Color B", "Цвет вершин B"), int(ROAD_VIEW_COLOR_B));
+		view_->addItem(uiText("Vertex Color RGB", "Цвет вершин RGB"), int(ROAD_VIEW_COLOR_RGB));
+		// The colors were shown before they went away: they come back.
+		const int wanted = view_->findData(wanted_view_);
+		if (wanted >= 0)
+			view_->setCurrentIndex(wanted);
+	} else
+	{
+		// The road has no colors to show: the grid instead, until it has them again.
+		if (view_->currentData().toInt() >= int(ROAD_VIEW_COLOR_R))
+			view_->setCurrentIndex(view_->findData(int(ROAD_VIEW_GRID)));
+		for (int view = ROAD_VIEW_COLOR_R; view <= ROAD_VIEW_COLOR_RGB; ++view)
+			view_->removeItem(view_->findData(view));
+	}
+	view_items_changing_ = false;
 }
 
 void RoadBuilderPage::rescan_roads()

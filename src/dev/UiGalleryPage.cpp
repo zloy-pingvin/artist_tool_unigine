@@ -304,7 +304,12 @@ protected:
 			else if (drag_ == last)
 				value.setX(1.0);
 			else
-				value.setX(qBound(points_[drag_ - 1].x() + 0.01, value.x(), points_[drag_ + 1].x() - 0.01));
+			{
+				// Between the neighbours; two of them closer than the margins: in the middle.
+				const double low = points_[drag_ - 1].x() + 0.01;
+				const double high = points_[drag_ + 1].x() - 0.01;
+				value.setX(low <= high ? qBound(low, value.x(), high) : (low + high) * 0.5);
+			}
 			points_[drag_] = value;
 			update();
 		}
