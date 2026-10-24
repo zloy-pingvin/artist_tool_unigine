@@ -122,6 +122,9 @@ public:
 
 	// The tool works (draws the curve, keeps the objects on it) only while active.
 	void setActive(bool active);
+	// The plugin shuts down: the tool stops (as setActive(false)) without removing a new
+	// line that has no points yet.
+	void shutdown();
 	// Makes the path the selected node belongs to the current one. A selection
 	// outside of any path leaves the current path as it is.
 	void updateFromSelection();

@@ -303,6 +303,7 @@ WireSettings limited(WireSettings settings)
 	settings.mesh_scale = qMax(settings.mesh_scale, 0.001f);
 	settings.mesh_angle = qBound(0.0f, settings.mesh_angle, 90.0f);
 	settings.twist_step = qBound(0.0f, settings.twist_step, 180.0f);
+	settings.end_offset = qBound(0.0f, settings.end_offset, 1000.0f);
 	settings.piece_size = qMax(settings.piece_size, 0.0f);
 	settings.visible_distance = qMax(settings.visible_distance, 0.0f);
 	settings.lod_factor = qBound(2, settings.lod_factor, 64);
@@ -362,6 +363,7 @@ QJsonObject to_json(const WireSettings &s)
 	json.insert("mesh_scale", double(s.mesh_scale));
 	json.insert("mesh_angle", double(s.mesh_angle));
 	json.insert("twist_step", double(s.twist_step));
+	json.insert("end_offset", double(s.end_offset));
 	json.insert("piece_size", double(s.piece_size));
 	json.insert("visible_distance", double(s.visible_distance));
 	json.insert("lod", s.lod);
@@ -432,6 +434,7 @@ WireSettings from_json(const QJsonObject &json)
 	s.mesh_scale = float(json.value("mesh_scale").toDouble(d.mesh_scale));
 	s.mesh_angle = float(json.value("mesh_angle").toDouble(d.mesh_angle));
 	s.twist_step = float(json.value("twist_step").toDouble(d.twist_step));
+	s.end_offset = float(json.value("end_offset").toDouble(d.end_offset));
 	s.piece_size = float(json.value("piece_size").toDouble(d.piece_size));
 	s.visible_distance = float(json.value("visible_distance").toDouble(d.visible_distance));
 	s.lod = json.value("lod").toBool(d.lod);
@@ -466,11 +469,20 @@ WireBuilder::~WireBuilder()
 	on_changed = nullptr;
 	on_message = nullptr;
 	on_lines_changed = nullptr;
-	setActive(false);
+	shutdown();
 	remove_preview();
 	show_hidden_pieces();
 	editor_.on_changed = nullptr;
 	editor_.on_message = nullptr;
+}
+
+void WireBuilder::shutdown()
+{
+	// A new line left without points is kept in the world, not removed: removing it is
+	// a step of the undo history, and the plugin resets the history right after it has
+	// shut down - a step pushed while it shuts down crashes the editor.
+	discard_if_empty_ = false;
+	setActive(false);
 }
 
 void WireBuilder::setActive(bool active)
@@ -487,6 +499,11 @@ void WireBuilder::setActive(bool active)
 		Engine::get()->getEventEndWorldUpdate().connect(connections_, this, &WireBuilder::update);
 		// Hidden pieces are saved shown; they are hidden again on the next frame.
 		World::getEventPreWorldSave().connect(connections_, [this](const char *) { show_hidden_pieces(); });
+		// The mesh laid along the wires is read again when an asset it is made of is saved,
+		// reimported, moved or removed.
+		AssetManager::getEventAssetChanged().connect(connections_, [this](const char *path) { asset_changed(path); });
+		AssetManager::getEventAssetRemoved().connect(connections_, [this](const char *path) { asset_changed(path); });
+		AssetManager::getEventAssetMoved().connect(connections_, [this](const char *from, const char *) { asset_changed(from); });
 		// Esc ends adding poles; Ctrl+Z is told from a pole selected.
 		qApp->installEventFilter(this);
 		// The poles and the mesh may have changed while the tool was off.
@@ -697,6 +714,7 @@ void WireBuilder::forget_line()
 	placed_points_.clear();
 	wires_.clear();
 	wire_poles_.clear();
+	wire_anchors_.clear();
 	cuts_.clear();
 	triangles_ = 0;
 	state_.clear();
@@ -826,7 +844,10 @@ bool WireBuilder::cloneLine()
 	// made anew by the copy, the mesh by its Generate.
 	const NodePtr source = root_;
 	NodeDummyPtr root = NodeDummy::create();
-	root->setName(unique_line_name(QString::fromUtf8(source->getName())).toUtf8().constData());
+	QSet<QString> names;
+	for (const WireLineInfo &line : findLines())
+		names.insert(line.name);
+	root->setName(copyName(QString::fromUtf8(source->getName()), names).toUtf8().constData());
 	root->setWorldTransform(source->getWorldTransform());
 	for (const char *name : {SETTINGS_DATA, POLES_DATA})
 	{
@@ -2228,10 +2249,18 @@ QByteArray WireBuilder::snapshot(const QVector<WireEnds> &ends) const
 		json.remove("fade_distance");
 		json.remove("lod_distance");
 		json.remove("lod_fade");
+		// Not there while it is off, so the lines generated before it was added stay up to
+		// date.
+		if (settings_.end_offset <= 0.0f)
+			json.remove("end_offset");
 		snapshot_settings_ = QJsonDocument(json).toJson(QJsonDocument::Compact);
 		snapshot_settings_valid_ = true;
 	}
 	QByteArray state = snapshot_settings_;
+	// The mesh laid along the wires as it is now: a line made before its asset was
+	// changed is outdated.
+	if (settings_.shape == WIRE_SHAPE_MESH)
+		state.append(mesh_source_.fingerprint);
 	for (const WireEnds &end : ends)
 	{
 		putBytes(state, double(end.pole_a));
@@ -2251,17 +2280,20 @@ void WireBuilder::rebuild(const QVector<WireEnds> &ends)
 {
 	wires_.clear();
 	wire_poles_.clear();
+	wire_anchors_.clear();
 	cuts_.clear();
 	triangles_ = 0;
 	rebuild_error_.clear();
+	const bool mesh = settings_.shape == WIRE_SHAPE_MESH;
+	// Before the state is taken: it has the mesh in it.
+	if (mesh)
+		load_mesh_source();
 	state_ = snapshot(ends);
 	preview_dirty_ = true;
 
-	const bool mesh = settings_.shape == WIRE_SHAPE_MESH;
 	double copy_length = 0.0;
 	if (mesh)
 	{
-		load_mesh_source();
 		if (mesh_source_.isEmpty())
 			return;
 		copy_length = double(bendBounds(mesh_source_, mesh_axes()).length());
@@ -2299,8 +2331,21 @@ void WireBuilder::rebuild(const QVector<WireEnds> &ends)
 		const double random_percent = end.sag_random >= 0.0 ? end.sag_random : double(settings_.sag_random);
 		sag *= end.sag_scale * (1.0 + random_percent * 0.01 * double(random_sag));
 
+		// End Offset: the wire hangs between points moved from the attach points toward each
+		// other, never so far that less than a tenth of it is left; it sags as the whole span
+		// does, so the offset does not pull it tighter.
+		Math::Vec3 from = end.from;
+		Math::Vec3 to = end.to;
+		const double shift = qMin(double(settings_.end_offset), chord * 0.45);
+		if (shift > 1e-9)
+		{
+			const Math::Vec3 step = (end.to - end.from) * Math::Scalar(shift / chord);
+			from = from + step;
+			to = to - step;
+		}
+
 		WireSpan span;
-		hangWire(end.from, end.to, sag, double(settings_.segment_angle), settings_.min_segments,
+		hangWire(from, to, sag, double(settings_.segment_angle), settings_.min_segments,
 			double(settings_.max_segment_length), span);
 		if (span.isEmpty())
 			continue;
@@ -2339,11 +2384,13 @@ void WireBuilder::rebuild(const QVector<WireEnds> &ends)
 		}
 		wires_.append(span);
 		wire_poles_.append(qMakePair(end.pole_a, end.pole_b));
+		wire_anchors_.append(qMakePair(end.from, end.to));
 	}
 	if (triangles > MAX_TRIANGLES)
 	{
 		wires_.clear();
 		wire_poles_.clear();
+		wire_anchors_.clear();
 		rebuild_error_ = uiText("The wires would have more than %1 triangles: make Bend Angle or Mesh Angle larger, or the mesh lighter.",
 			"У проводов было бы больше %1 треугольников: увеличьте «Угол изгиба» или «Угол меша», или возьмите меш полегче.").arg(MAX_TRIANGLES);
 		report(MSG_WARNING, rebuild_error_);
@@ -2389,10 +2436,11 @@ void WireBuilder::find_cuts()
 		Math::Vec3 along(0.0);
 		for (int w : wires)
 		{
+			// At the attach points, not at the ends of the wires (End Offset moves them off).
 			const bool starts = wire_poles_[w].first == it.key();
-			points.append(starts ? wires_[w].from : wires_[w].to);
+			points.append(starts ? wire_anchors_[w].first : wire_anchors_[w].second);
 			// Every wire goes the way of the line, from its pole to the next one.
-			const Math::Vec3 way = unitOrZero(wires_[w].to - wires_[w].from);
+			const Math::Vec3 way = unitOrZero(wire_anchors_[w].second - wire_anchors_[w].first);
 			along += Math::Vec3(way.x, way.y, 0.0);
 		}
 		Math::Vec3 forward = unitOrZero(along);
@@ -2449,6 +2497,19 @@ void WireBuilder::load_mesh_source()
 		mesh_error_ = QString::fromUtf8("%1: %2").arg(settings_.mesh_name, error);
 	else if (!mesh_source_.note.isEmpty())
 		report(MSG_INFO, QString::fromUtf8("%1: %2").arg(settings_.mesh_name, mesh_source_.note));
+}
+
+void WireBuilder::asset_changed(const char *path)
+{
+	if (settings_.shape != WIRE_SHAPE_MESH || mesh_source_path_.isEmpty())
+		return;
+	// Only the assets the mesh is made of: the asset itself (also when it could not be
+	// loaded), the nodes it references, the files of its meshes.
+	const QString changed = bendSourceFile(path);
+	if (changed.isEmpty() || !mesh_source_.files.contains(changed))
+		return;
+	mesh_source_path_.clear();
+	state_.clear();
 }
 
 BendAxes WireBuilder::mesh_axes() const

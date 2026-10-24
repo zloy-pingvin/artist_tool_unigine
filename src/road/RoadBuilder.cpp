@@ -907,11 +907,20 @@ RoadBuilder::~RoadBuilder()
 	on_changed = nullptr;
 	on_message = nullptr;
 	on_roads_changed = nullptr;
-	setActive(false);
+	shutdown();
 	remove_preview();
 	show_hidden_pieces();
 	editor_.on_changed = nullptr;
 	editor_.on_message = nullptr;
+}
+
+void RoadBuilder::shutdown()
+{
+	// A new line left without points is kept in the world, not removed: removing it is
+	// a step of the undo history, and the plugin resets the history right after it has
+	// shut down - a step pushed while it shuts down crashes the editor.
+	discard_if_empty_ = false;
+	setActive(false);
 }
 
 void RoadBuilder::setActive(bool active)
@@ -926,6 +935,11 @@ void RoadBuilder::setActive(bool active)
 		// The road is drawn with the Visualizer, once per frame.
 		requestVisualizer();
 		Engine::get()->getEventEndWorldUpdate().connect(connections_, this, &RoadBuilder::update);
+		// The meshes to bend are read again when an asset they are made of is saved,
+		// reimported, moved or removed.
+		AssetManager::getEventAssetChanged().connect(connections_, [this](const char *path) { bend_asset_changed(path); });
+		AssetManager::getEventAssetRemoved().connect(connections_, [this](const char *path) { bend_asset_changed(path); });
+		AssetManager::getEventAssetMoved().connect(connections_, [this](const char *from, const char *) { bend_asset_changed(from); });
 		// Hidden pieces are saved shown; they are hidden again on the next frame.
 		World::getEventPreWorldSave().connect(connections_, [this](const char *) {
 			show_hidden_pieces();
@@ -1219,7 +1233,10 @@ bool RoadBuilder::cloneRoad()
 	// The points and the settings; the mesh is the copy's own, made by its Generate.
 	const NodePtr source = root_;
 	NodeDummyPtr root = NodeDummy::create();
-	root->setName(unique_road_name(QString::fromUtf8(source->getName())).toUtf8().constData());
+	QSet<QString> names;
+	for (const RoadInfo &road : findRoads())
+		names.insert(road.name);
+	root->setName(copyName(QString::fromUtf8(source->getName()), names).toUtf8().constData());
 	root->setWorldTransform(source->getWorldTransform());
 	if (const char *data = source->getData(SETTINGS_DATA))
 		root->setData(SETTINGS_DATA, data);
@@ -1653,6 +1670,8 @@ QByteArray RoadBuilder::snapshot() const
 		for (const RoadBendPart &part : settings_.bend_parts)
 		{
 			state.append(part.source.toUtf8()).append('|');
+			// The mesh as it is now: a road made before its asset was changed is outdated.
+			state.append(bend_sources_.value(part.source).fingerprint);
 			putBytes(state, double(part.role));
 			putBytes(state, double(part.count));
 			putBytes(state, Math::Vec3(part.scale));
@@ -1762,6 +1781,9 @@ void RoadBuilder::rebuild_grid(bool on_ground)
 	grid_ = RoadGrid();
 	bend_ = RoadBend();
 	preview_dirty_ = true;
+	// Before the state is taken: it has the meshes to bend in it.
+	if (settings_.output == ROAD_OUTPUT_BENT)
+		load_bend_parts();
 	grid_state_ = snapshot();
 	grid_draft_ = !on_ground && settings_.snap_to_ground && settings_.output != ROAD_OUTPUT_BENT;
 
@@ -3194,6 +3216,39 @@ void RoadBuilder::load_bend_parts()
 		}
 		else
 			bend_errors_.insert(part.source, QString::fromUtf8("%1: %2").arg(part.source_name, error));
+	}
+}
+
+void RoadBuilder::bend_asset_changed(const char *path)
+{
+	const QString changed = bendSourceFile(path);
+	if (changed.isEmpty())
+		return;
+	// Only the meshes made of that asset; one that could not be loaded is tried again when
+	// its own file changes.
+	bool any = false;
+	for (auto it = bend_sources_.begin(); it != bend_sources_.end();)
+	{
+		if (it->files.contains(changed))
+		{
+			it = bend_sources_.erase(it);
+			any = true;
+		} else
+			++it;
+	}
+	for (auto it = bend_errors_.begin(); it != bend_errors_.end();)
+	{
+		if (bendSourceFile(it.key().toUtf8().constData()) == changed)
+		{
+			it = bend_errors_.erase(it);
+			any = true;
+		} else
+			++it;
+	}
+	if (any)
+	{
+		grid_state_.clear();
+		notify_changed();
 	}
 }
 

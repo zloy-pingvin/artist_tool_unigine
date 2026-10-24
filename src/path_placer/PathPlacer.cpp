@@ -209,9 +209,18 @@ PathPlacer::~PathPlacer()
 	on_changed = nullptr;
 	on_message = nullptr;
 	on_paths_changed = nullptr;
-	setActive(false);
+	shutdown();
 	editor_.on_changed = nullptr;
 	editor_.on_message = nullptr;
+}
+
+void PathPlacer::shutdown()
+{
+	// A new line left without points is kept in the world, not removed: removing it is
+	// a step of the undo history, and the plugin resets the history right after it has
+	// shut down - a step pushed while it shuts down crashes the editor.
+	discard_if_empty_ = false;
+	setActive(false);
 }
 
 void PathPlacer::setActive(bool active)

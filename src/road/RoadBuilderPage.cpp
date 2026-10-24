@@ -131,7 +131,7 @@ RoadBuilderPage::~RoadBuilderPage()
 
 void RoadBuilderPage::stop()
 {
-	builder_->setActive(false);
+	builder_->shutdown();
 }
 
 void RoadBuilderPage::showEvent(QShowEvent *event)

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<asset version="2.22.0.0">
+	<guid>338399acf1b78e77ba15c9d62a9a922b1b1fef7a</guid>
+	<type>texture</type>
+	<hash>08c8b12a672d5809c406d5ffe4cbc28e43c2cce81bd8101c4af436e308fd5674</hash>
+	<runtimes>
+		<runtime id="338399acf1b78e77ba15c9d62a9a922b1b1fef7a" name="road_asphalt_n_0.tga" link="0" type="6"/>
+		<runtime id="7deb2ded33517797cfe1d88b2ba8a974b962b891" name="road_asphalt_n_0.texture" link="1" type="6"/>
+	</runtimes>
+	<parameters>
+		<parameter type="int" name="blur_radius">1</parameter>
+		<parameter type="string" name="height">auto</parameter>
+		<parameter type="string" name="image_format">ATI2</parameter>
+		<parameter type="string" name="image_type">2d</parameter>
+		<parameter type="bool" name="invert_g">0</parameter>
+		<parameter type="bool" name="mipmap_sharp_only_lightness">0</parameter>
+		<parameter type="string" name="mipmap_type">box</parameter>
+		<parameter type="string" name="preset_name">normal map (rg)</parameter>
+		<parameter type="float" name="sharpness_intensity">0.25</parameter>
+		<parameter type="float" name="sharpness_radius">1</parameter>
+		<parameter type="bool" name="srgb_correction">0</parameter>
+		<parameter type="bool" name="unchanged">0</parameter>
+		<parameter type="string" name="width">auto</parameter>
+	</parameters>
+</asset>

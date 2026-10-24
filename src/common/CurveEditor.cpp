@@ -18,6 +18,7 @@
 #include <QEvent>
 #include <QMouseEvent>
 #include <QSettings>
+#include <QToolTip>
 #include <QVariant>
 #include <QWidget>
 
@@ -918,8 +919,23 @@ bool CurveEditor::handleEvent(QObject *watched, QEvent *event)
 				ignore.append(look_through_);
 			const SurfaceHit hit = raycastSurface(p0, p1, filter_, ignore);
 			if (!hit.found)
-				report(MSG_WARNING, uiText("Click on a surface to add a point there.", "Кликните по поверхности, чтобы добавить на неё точку."));
-			else if (NodePtr point = add_point(hit.point, mouse->modifiers() & Qt::ControlModifier))
+			{
+				// Something is under the cursor, only Lay On leaves it out (its kind, or Only
+				// Immovable / Only Intersection): tell that, not "click on a surface" while the
+				// user does. The same filter that blocks the ray instead of looking through.
+				SurfaceFilter blocking = filter_;
+				blocking.look_through = false;
+				const bool left_out = raycastSurface(p0, p1, blocking, ignore).found;
+				const QString warning = left_out
+					? uiText("Lay On leaves this surface out: change it to put points here.",
+						"«Класть на» не пускает эту поверхность: измените его, чтобы ставить сюда точки.")
+					: uiText("Click on a surface to add a point there.", "Кликните по поверхности, чтобы добавить на неё точку.");
+				report(MSG_WARNING, warning);
+				// Also right where the click was, in red: the status line of the page is far
+				// from the viewport and easy to miss.
+				QToolTip::showText(mouse->globalPosition().toPoint(),
+					QString::fromUtf8("<span style=\"color:#ff6b6b;\">%1</span>").arg(warning.toHtmlEscaped()), viewport);
+			} else if (NodePtr point = add_point(hit.point, mouse->modifiers() & Qt::ControlModifier))
 			{
 				// The new point is not selected: it is the last one and is drawn green,
 				// the point the next one continues from.

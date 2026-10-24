@@ -7,6 +7,7 @@
 #include <UnigineMathLib.h>
 #include <UnigineMesh.h>
 
+#include <QByteArray>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -17,6 +18,11 @@
 // is laid along the curve again and again, its copies bent to follow it.
 namespace ArtistTool
 {
+
+// The asset of the project a file path stands for (a runtime of an imported model - the
+// model), as a virtual path in lower case with forward slashes; empty for an empty path.
+// The same name for a path given as a GUID and as a file.
+QString bendSourceFile(const char *path);
 
 // The mesh that is bent: all the objects of an asset, in the space of the asset,
 // surface by surface with their materials, the distances they are seen at and how they
@@ -58,6 +64,13 @@ struct BendSource
 	QVector<Surface> surfaces;
 	// What could not be taken as it is, for the user; empty if all went well.
 	QString note;
+	// The assets of the project the mesh is made of, as bendSourceFile() names them: the
+	// asset itself, the nodes it references, the files of the meshes of its objects. When
+	// one of them changes, the source is to be loaded again.
+	QStringList files;
+	// What the surfaces are, as a hash: tells a source loaded again after its asset
+	// changed from the one loaded before. Empty if it could not be loaded.
+	QByteArray fingerprint;
 
 	bool isEmpty() const { return surfaces.isEmpty(); }
 	int numTriangles() const;

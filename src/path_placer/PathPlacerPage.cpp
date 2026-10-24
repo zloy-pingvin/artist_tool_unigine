@@ -94,7 +94,7 @@ PathPlacerPage::~PathPlacerPage()
 
 void PathPlacerPage::stop()
 {
-	placer_->setActive(false);
+	placer_->shutdown();
 }
 
 void PathPlacerPage::showEvent(QShowEvent *event)

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<asset version="2.22.0.0">
+	<guid>1b923e266540a4cffb2e31fed6892161844c2f89</guid>
+	<type>material</type>
+	<hash>f6ea3bf053fa5f345ef12885574fdb073693ba694403ff1f1b97ee887fa8c98a</hash>
+	<runtimes>
+		<runtime id="1b923e266540a4cffb2e31fed6892161844c2f89" name="wire_alpha_blend" link="0" type="5"/>
+	</runtimes>
+	<parameters>
+		<parameter type="bool" name="unchanged">1</parameter>
+	</parameters>
+</asset>

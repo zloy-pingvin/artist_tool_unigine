@@ -159,6 +159,7 @@ private:
 	QDoubleSpinBox *mesh_scale_{nullptr};
 	QDoubleSpinBox *mesh_angle_{nullptr};
 	QDoubleSpinBox *twist_step_{nullptr};
+	QDoubleSpinBox *end_offset_{nullptr};
 	// What only strips and tubes have, what only a tube has, what only a mesh has.
 	QVector<QWidget *> strip_widgets_;
 	QVector<QWidget *> tube_widgets_;

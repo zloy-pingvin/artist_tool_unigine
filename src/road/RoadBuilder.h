@@ -118,10 +118,11 @@ struct RoadSettings
 	// How far above that surface, in units.
 	float ground_offset{0.01f};
 	// What the road and its points are laid on; everything else is looked through
-	// (a road over rocks lies on the terrain under them). The terrain and static meshes
-	// only by default: a ray through clutters and clusters (grass, branches, trees) is
-	// tens of times slower, and a road is not laid on them anyway.
-	SurfaceFilter ground{SurfaceFilter::TERRAIN | SurfaceFilter::MESH_STATIC};
+	// (a road over rocks lies on the terrain under them). The terrain and static and
+	// dynamic meshes (the ground plane of a new world is a dynamic one) only by default:
+	// a ray through clutters and clusters (grass, branches, trees) is tens of times
+	// slower, and a road is not laid on them anyway.
+	SurfaceFilter ground{SurfaceFilter::TERRAIN | SurfaceFilter::MESH_STATIC | SurfaceFilter::MESH_DYNAMIC};
 	// The inner edge of a tight bend is laid along a smooth arc where it gets sharper
 	// than this radius or folds over itself; the arc takes in this much of the road
 	// before and after that place, in units. 0 - only the folds are rounded.
@@ -300,6 +301,9 @@ public:
 
 	// The tool draws the road and takes the clicks only while active.
 	void setActive(bool active);
+	// The plugin shuts down: the tool stops (as setActive(false)) without removing a new
+	// line that has no points yet.
+	void shutdown();
 	// Makes the road the selected node belongs to the current one. A selection
 	// outside of any road leaves the current road as it is.
 	void updateFromSelection();
@@ -503,6 +507,8 @@ private:
 		const QVector<Unigine::Math::Vec3> &samples, const QVector<double> &distances);
 	// Loads the assets to bend that are not loaded yet.
 	void load_bend_parts();
+	// An asset of the project has changed: the meshes to bend made of it are read again.
+	void bend_asset_changed(const char *path);
 	BendAxes bend_axes(int part) const;
 	// The names of the surfaces of the result every surface of every mesh of the list
 	// goes to, and what each such surface of the result gets: its material, LOD

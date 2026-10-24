@@ -243,7 +243,7 @@ WireBuilderPage::~WireBuilderPage()
 
 void WireBuilderPage::stop()
 {
-	builder_->setActive(false);
+	builder_->shutdown();
 }
 
 void WireBuilderPage::resetSettings()
@@ -1276,8 +1276,8 @@ QWidget *WireBuilderPage::build_sag_group()
 QWidget *WireBuilderPage::build_shape_group()
 {
 	const WireSettings defaults;
-	// The rotation, the twist and the size of the pieces are folded under "Advanced Settings"
-	// at the bottom, in the same columns.
+	// The rotation, the twist, the offset of the ends and the size of the pieces are folded under
+	// "Advanced Settings" at the bottom, in the same columns.
 	QGroupBox *group = new QGroupBox(uiText("Shape", "Форма"));
 	QVBoxLayout *group_layout = new QVBoxLayout(group);
 	QGridLayout *layout = new QGridLayout;
@@ -1424,6 +1424,21 @@ QWidget *WireBuilderPage::build_shape_group()
 	add_field(advanced, advanced_row, 0, uiText("Twist Step", "Шаг закрутки"), twist_step_, twist_step_tooltip,
 		[this, defaults]() { twist_step_->setValue(defaults.twist_step); }, &twist_step_widgets_);
 	first_labels << twist_step_widgets_[0];
+	++advanced_row;
+
+	const QString end_offset_tooltip = loc_.tip(
+		"How far from its attach points every wire starts and ends, in units: both ends move "
+		"along the wire toward each other. For a chain or a cable tied to the middle of a post - "
+		"the radius of the post, so that it does not go into it. 0 - right at the points.",
+		"Насколько дальше от точек крепления начинается и кончается каждый провод, в юнитах: "
+		"оба конца сдвигаются вдоль провода навстречу друг другу. Для цепи или кабеля, "
+		"привязанных к середине столбика, - радиус столбика, чтобы они в него не уходили. "
+		"0 - прямо в точках.");
+	end_offset_ = make_spin_box(0.0, 1000.0, 0.01, 3, end_offset_tooltip);
+	QVector<QWidget *> end_offset_row;
+	add_field(advanced, advanced_row, 0, uiText("End Offset", "Отступ концов"), end_offset_, end_offset_tooltip,
+		[this, defaults]() { end_offset_->setValue(defaults.end_offset); }, &end_offset_row);
+	first_labels << end_offset_row[0];
 	++advanced_row;
 
 	// The material of the strips and the tubes, a field as the editor's own.
@@ -1574,8 +1589,8 @@ QWidget *WireBuilderPage::build_shape_group()
 	++advanced_row;
 
 	shape_advanced_header_ = makeSectionHeader(uiText("Advanced Settings", "Дополнительные настройки"), advanced_widget);
-	shape_advanced_header_->setToolTip(loc_.tip("The rotation and the twist of the wires, the size of the pieces.",
-		"Поворот и закрутка проводов, размер кусков."));
+	shape_advanced_header_->setToolTip(loc_.tip("The rotation and the twist of the wires, the offset of their ends, the size of the pieces.",
+		"Поворот и закрутка проводов, отступ их концов, размер кусков."));
 	group_layout->addWidget(shape_advanced_header_);
 	group_layout->addWidget(advanced_widget);
 	// The labels that are always there set the first column of both grids alike, so that
@@ -1848,6 +1863,7 @@ WireSettings WireBuilderPage::read_settings() const
 	settings.mesh_scale = field_value(mesh_scale_, current.mesh_scale);
 	settings.mesh_angle = field_value(mesh_angle_, current.mesh_angle);
 	settings.twist_step = field_value(twist_step_, current.twist_step);
+	settings.end_offset = field_value(end_offset_, current.end_offset);
 	settings.piece_size = field_value(piece_size_, current.piece_size);
 	settings.visible_distance = field_value(visible_distance_, current.visible_distance);
 	settings.lod = lod_->isChecked();
@@ -1921,6 +1937,7 @@ void WireBuilderPage::refresh()
 	show_value(mesh_scale_, settings.mesh_scale);
 	show_value(mesh_angle_, settings.mesh_angle);
 	show_value(twist_step_, settings.twist_step);
+	show_value(end_offset_, settings.end_offset);
 	if (QAbstractButton *button = mesh_forward_->button(settings.mesh_forward))
 		button->setChecked(true);
 	if (QAbstractButton *button = mesh_up_->button(settings.mesh_up))

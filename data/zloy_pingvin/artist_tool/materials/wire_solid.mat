@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<material version="2.22.0.0" guid="e8105cac207eefb516f037923dd087dfbc2d2962" base_material="4dfec30f491f753f6e89094db6d3d695e89f9d6f">
+	<options transparent="0" blend_src="0" blend_dest="0" two_sided="1"/>
+	<state name="vegetation">1</state>
+	<state name="geometry_inflation">2</state>
+	<state name="animation">1</state>
+	<state name="leafs">3</state>
+	<parameter name="albedo_color" expression="0">0.113725491 0.113725491 0.113725491 1</parameter>
+	<parameter name="roughness" expression="0">0.577099979</parameter>
+	<parameter name="specular" expression="0">0.759339988</parameter>
+	<parameter name="vertex_balloon" expression="0">0.0199999996</parameter>
+	<parameter name="animation_stem_noise" expression="0">0</parameter>
+	<parameter name="animation_stem_offset" expression="0">0</parameter>
+	<parameter name="animation_stem_radius" expression="0">0</parameter>
+	<parameter name="animation_stem_scale" expression="0">0</parameter>
+	<parameter name="animation_branch_offset" expression="0">0.100000001</parameter>
+	<parameter name="animation_leaf_noise" expression="0">0.0500000007</parameter>
+	<parameter name="animation_leaf_offset" expression="0">0.172879994</parameter>
+</material>

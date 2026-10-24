@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<material version="2.22.0.0" guid="1b923e266540a4cffb2e31fed6892161844c2f89" base_material="4dfec30f491f753f6e89094db6d3d695e89f9d6f">
+	<options transparent="2" blend_src="5" blend_dest="6" two_sided="1"/>
+	<state name="vegetation">1</state>
+	<state name="normals_rotated_to_camera">1</state>
+	<state name="backside_normal">1</state>
+	<state name="animation">1</state>
+	<state name="leafs">3</state>
+	<texture name="albedo">guid://995b77ca9438733556ab2722e90372323d9fe41d</texture>
+	<texture name="normal">guid://86bcd8ffb57d79e7b565ed47824397a2e7aa9236</texture>
+	<parameter name="animation_stem_noise" expression="0">0</parameter>
+	<parameter name="animation_stem_offset" expression="0">0</parameter>
+	<parameter name="animation_stem_radius" expression="0">0</parameter>
+	<parameter name="animation_stem_scale" expression="0">0</parameter>
+	<parameter name="animation_branch_offset" expression="0">0.100000001</parameter>
+	<parameter name="animation_leaf_noise" expression="0">0.0500000007</parameter>
+	<parameter name="animation_leaf_offset" expression="0">0.172879994</parameter>
+</material>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<asset version="2.22.0.0">
+	<guid>e8105cac207eefb516f037923dd087dfbc2d2962</guid>
+	<type>material</type>
+	<hash>24bb49f148ae25b64763f3e59591ec4b361bd04d9b8858e7e834b6c8ada991c5</hash>
+	<runtimes>
+		<runtime id="e8105cac207eefb516f037923dd087dfbc2d2962" name="wire_solid" link="0" type="5"/>
+	</runtimes>
+	<parameters>
+		<parameter type="bool" name="unchanged">1</parameter>
+	</parameters>
+</asset>

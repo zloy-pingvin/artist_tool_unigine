@@ -134,6 +134,10 @@ struct WireSettings
 	// The most a strip or a tube turns by the twist from one joint to the next, in degrees:
 	// a long segment gets joints in between. 0 - no joints for the twist.
 	float twist_step{90.0f};
+	// Both ends of every wire start this many units away from their attach points, toward
+	// each other: a chain tied to the middle of a post starts at its surface, not inside it.
+	// 0 - right at the points.
+	float end_offset{0.0f};
 	// The length of the wire one repeat of the texture takes, in units.
 	float uv_length{1.0f};
 	// Repeats of the texture across a strip, around a tube.
@@ -215,6 +219,9 @@ public:
 
 	// The tool shows the wires and takes the poles only while active.
 	void setActive(bool active);
+	// The plugin shuts down: the tool stops (as setActive(false)) without removing a new
+	// line that has no points yet.
+	void shutdown();
 	// The editor selection has changed: while poles are added, the newly selected nodes
 	// become poles; else the line the selected node belongs to becomes the current one.
 	void selectionChanged();
@@ -504,6 +511,8 @@ private:
 	// The material of the strips and the tubes, for the line and its pieces at once.
 	void set_material(const QString &material);
 	void load_mesh_source();
+	// An asset of the project has changed: the mesh laid along the wires is read again.
+	void asset_changed(const char *path);
 	BendAxes mesh_axes() const;
 	// The names of the surfaces of the mesh laid along the wires, one per surface of
 	// the source.
@@ -563,6 +572,9 @@ private:
 	QVector<WireSpan> wires_;
 	// The poles every wire goes between (their IDs), from - to.
 	QVector<QPair<int, int>> wire_poles_;
+	// The attach points every wire goes between, from - to: its ends are off them by End
+	// Offset.
+	QVector<QPair<Unigine::Math::Vec3, Unigine::Math::Vec3>> wire_anchors_;
 	// Where the line is cut into pieces: a plane across it at a pole, drawn yellow.
 	struct CutQuad
 	{

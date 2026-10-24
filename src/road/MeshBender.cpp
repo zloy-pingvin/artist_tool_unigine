@@ -1,10 +1,12 @@
 #include "MeshBender.h"
 #include "Localization.h"
 
+#include <UnigineFileSystem.h>
 #include <UnigineMaterials.h>
 #include <UnigineNodes.h>
 #include <UnigineObjects.h>
 
+#include <QCryptographicHash>
 #include <QHash>
 #include <QPair>
 #include <QRegularExpression>
@@ -43,17 +45,25 @@ void axis_vectors(const BendAxes &axes, Math::vec3 &forward, Math::vec3 &right, 
 }
 
 // The objects of a node and of everything in it, the content of node references too.
-// A disabled node is not drawn in the asset, and neither is anything in it.
-void collect_objects(const NodePtr &node, QVector<ObjectMeshStaticPtr> &objects)
+// A disabled node is not drawn in the asset, and neither is anything in it. The files of
+// the node references and of the meshes are added to 'files' (see BendSource::files).
+void collect_objects(const NodePtr &node, QVector<ObjectMeshStaticPtr> &objects, QStringList &files)
 {
 	if (!node || !node->isEnabled())
 		return;
 	if (node->getType() == Node::OBJECT_MESH_STATIC)
-		objects.append(checked_ptr_cast<ObjectMeshStatic>(node));
-	else if (node->getType() == Node::NODE_REFERENCE)
-		collect_objects(checked_ptr_cast<NodeReference>(node)->getReference(), objects);
+	{
+		const ObjectMeshStaticPtr object = checked_ptr_cast<ObjectMeshStatic>(node);
+		objects.append(object);
+		files.append(bendSourceFile(object->getMeshPath()));
+	} else if (node->getType() == Node::NODE_REFERENCE)
+	{
+		const NodeReferencePtr reference = checked_ptr_cast<NodeReference>(node);
+		files.append(bendSourceFile(reference->getNodePath()));
+		collect_objects(reference->getReference(), objects, files);
+	}
 	for (int i = 0, num = node->getNumChildren(); i < num; ++i)
-		collect_objects(node->getChild(i), objects);
+		collect_objects(node->getChild(i), objects, files);
 }
 
 // A vertex of a surface with all it carries, and where it is along the forward axis.
@@ -203,9 +213,30 @@ int BendSource::numTriangles() const
 	return triangles;
 }
 
+QString bendSourceFile(const char *path)
+{
+	if (String::isEmpty(path))
+		return QString();
+	// A runtime of an imported asset ("guid://..." of a mesh of an .fbx) is told by the
+	// asset it comes from: that is the file that changes when it is reimported.
+	const UGUID guid = FileSystem::getGUID(path);
+	String virtual_path;
+	if (guid.isValid())
+	{
+		const UGUID asset = FileSystemAssets::resolveAsset(guid);
+		virtual_path = FileSystem::getVirtualPath(asset.isValid() ? asset : guid);
+	}
+	if (virtual_path.empty())
+		virtual_path = path;
+	return QString::fromUtf8(virtual_path.get()).replace(QLatin1Char('\\'), QLatin1Char('/')).toLower();
+}
+
 bool BendSource::load(const PlaceableAsset &asset, BendSource &source, QString &error)
 {
 	source = BendSource();
+	// The asset itself first: a source that can not be loaded is to be tried again when
+	// its file changes too.
+	source.files.append(bendSourceFile(asset.path.get()));
 	NodePtr node = createNode(asset);
 	if (!node)
 	{
@@ -214,7 +245,9 @@ bool BendSource::load(const PlaceableAsset &asset, BendSource &source, QString &
 	}
 
 	QVector<ObjectMeshStaticPtr> objects;
-	collect_objects(node, objects);
+	collect_objects(node, objects, source.files);
+	source.files.removeAll(QString());
+	source.files.removeDuplicates();
 	const Math::Mat4 root_inverse = Math::inverse(node->getWorldTransform());
 
 	for (int object_index = 0; object_index < objects.size(); ++object_index)
@@ -417,6 +450,28 @@ bool BendSource::load(const PlaceableAsset &asset, BendSource &source, QString &
 		error = uiText("The asset has no meshes to bend.", "В ассете нет мешей, которые можно изогнуть.");
 		return false;
 	}
+
+	QCryptographicHash hash(QCryptographicHash::Md5);
+	const auto add = [&hash](const void *data, qsizetype size) {
+		hash.addData(QByteArrayView(static_cast<const char *>(data), size));
+	};
+	for (const Surface &surface : source.surfaces)
+	{
+		hash.addData(surface.name.toUtf8());
+		add(surface.material.getValue(), qsizetype(UGUID::VALUE_SIZE));
+		add(surface.positions.constData(), surface.positions.size() * qsizetype(sizeof(Math::vec3)));
+		add(surface.normals.constData(), surface.normals.size() * qsizetype(sizeof(Math::vec3)));
+		add(surface.uv0.constData(), surface.uv0.size() * qsizetype(sizeof(Math::vec2)));
+		add(surface.uv1.constData(), surface.uv1.size() * qsizetype(sizeof(Math::vec2)));
+		add(surface.colors.constData(), surface.colors.size() * qsizetype(sizeof(Math::vec4)));
+		add(surface.indices.constData(), surface.indices.size() * qsizetype(sizeof(int)));
+		const float distances[] = {surface.min_visible, surface.max_visible, surface.min_fade, surface.max_fade};
+		add(distances, qsizetype(sizeof(distances)));
+		const int flags[] = {surface.viewport_mask, surface.shadow_mask, int(surface.cast_shadow),
+			int(surface.cast_world_shadow), surface.lod, int(surface.shadow_lod), surface.object};
+		add(flags, qsizetype(sizeof(flags)));
+	}
+	source.fingerprint = hash.result();
 	return true;
 }
 

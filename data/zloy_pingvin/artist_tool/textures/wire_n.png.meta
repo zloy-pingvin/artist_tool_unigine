@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<asset version="2.22.0.0">
+	<guid>0bf0ac4504da557b9627194ddad84599a507df64</guid>
+	<type>texture</type>
+	<hash>1f0d0182224c8852cf9f4c4f5fad1d9b6430d7a6a2c494be081f1999cbc609cb</hash>
+	<runtimes>
+		<runtime id="0bf0ac4504da557b9627194ddad84599a507df64" name="wire_n.png" link="0" type="6"/>
+		<runtime id="86bcd8ffb57d79e7b565ed47824397a2e7aa9236" name="wire_n.texture" link="1" type="6"/>
+	</runtimes>
+	<parameters>
+		<parameter type="int" name="blur_radius">1</parameter>
+		<parameter type="string" name="height">auto</parameter>
+		<parameter type="string" name="image_format">ATI2</parameter>
+		<parameter type="string" name="image_type">2d</parameter>
+		<parameter type="bool" name="invert_g">0</parameter>
+		<parameter type="bool" name="mipmap_sharp_only_lightness">0</parameter>
+		<parameter type="string" name="mipmap_type">box</parameter>
+		<parameter type="string" name="preset_name">normal map (rg)</parameter>
+		<parameter type="float" name="sharpness_intensity">0.25</parameter>
+		<parameter type="float" name="sharpness_radius">1</parameter>
+		<parameter type="bool" name="srgb_correction">0</parameter>
+		<parameter type="bool" name="unchanged">0</parameter>
+		<parameter type="string" name="width">auto</parameter>
+	</parameters>
+</asset>

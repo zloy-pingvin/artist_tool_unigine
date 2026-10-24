@@ -2,7 +2,7 @@
 
 Tools for everyday level work in the **UNIGINE 2.22 Editor**: place props, build fences and roads, hang wires between poles, check dimensions, unpack clutter, and bake textures for simpler meshes. Everything lives in one dockable window: **Windows → Artist Tools**.
 
-[UNIGINE Store](https://store.unigine.com/en/publisher/1ee19a48-e62a-6d86-8136-9d637c69bc0c) · [Video overview](https://www.youtube.com/watch?v=lC9pwmAlltY) · [Build from source](docs/BUILDING.md)
+[UNIGINE Store](https://store.unigine.com/en/publisher/1ee19a48-e62a-6d86-8136-9d637c69bc0c) · [Video overview — Part 1](https://www.youtube.com/watch?v=lC9pwmAlltY) · [Part 2](https://www.youtube.com/watch?v=L-KC0PTh6I8) · [Build from source](docs/BUILDING.md)
 
 ![Fence following an editable curve in UNIGINE, with Path Placer control points visible](docs/images/path-placer.png)
 
@@ -28,6 +28,12 @@ For a manual installation, copy the plugin folder into your project so the binar
 
 ```text
 <project>/bin/plugins/zloy_pingvin/artist_tool/
+```
+
+Copy the default materials and textures of the plugin too: the [`data/zloy_pingvin/artist_tool/`](data/zloy_pingvin/artist_tool) folder of this repository goes to the same path in the data of your project, with its `.meta` files (they keep the GUIDs the tools look the materials up by):
+
+```text
+<project>/data/zloy_pingvin/artist_tool/
 ```
 
 Use binaries matching your editor's platform, precision (float or double), and build (Release or Debug). Start or restart the editor, then open **Windows → Artist Tools**.
@@ -56,21 +62,27 @@ Move the points to reshape the path. With **Live Update** enabled, the objects f
 
 In **Road**, click **New Road**, place points, and press **Esc**. Set the width, then choose **Mesh**, **Decal**, or **Bent Mesh**. Pick a material or source mesh and click **Generate**.
 
-Use per-point width and roll for widening sections and banked turns. Ground snapping follows the terrain; **On Curve** points let you make bridges and ramps. Generated meshes are saved to `roads/` beside the world, or to a folder you choose.
+Use per-point width and roll for widening sections and banked turns. **Lay On** selects the surface types used for ground snapping. **On Curve** excludes individual points from snapping, letting you raise sections for bridges and ramps. With a decal material using distance fade, raised sections can also create a gradual fade where the decal projects onto the ground. Generated meshes are saved to `roads/` beside the world, or to a folder you choose.
 
 Use a mesh material for **Mesh** and a decal material for **Decal**. Vertex-color controls provide masks for your material, and the viewport preview lets you inspect them. **Bent Mesh** supports repeating assets with separate start and end pieces.
 
 ### Hang wires between poles
 
-In **Wires**, click **New Line** and place points. Add pole assets and choose **At Points** or **Every** to control their spacing. Put dummy nodes named `wire_1`, `wire_2`, and so on inside each pole asset to mark attachment positions.
+In **Wires**, click **New Line** and place points. Add pole assets and choose **At Points** to place a pole at each curve point, or **Every** to space poles along the curve at a set interval. To use poles already placed in the scene, choose **Connect Poles** and add them with **Add Poles**.
 
-Set **Sag** and **Random**, then choose **Cross**, **Ribbon**, **Tube**, or **Mesh** under **Make Of**. Adjust individual spans with **Sag ×** and **Twist +**. **Above Ground** keeps the wire above the sampled ground; **Connect Poles** lets you add existing poles with **Add Poles**. Click **Generate** to save the result.
+Put dummy nodes named `wire_1`, `wire_2`, and so on inside each pole asset to mark attachment positions. The tool connects matching numbers between poles: `wire_1` to `wire_1`, `wire_2` to `wire_2`, and so on.
+
+Set **Sag** and **Random**, then choose **Cross**, **Ribbon**, **Tube**, or **Mesh** under **Make Of**. A custom mesh can turn the wire into a chain. Adjust individual spans with **Sag ×** and **Twist +**, tilt poles, and add an asset with the **Insulator** role to populate attachments. **Above Ground** keeps the wire above the sampled ground.
+
+Under **Advanced Settings**, **End Offset** moves both wire ends inward from their attachment points. This is useful when an attachment is at the center of a post and the cable should start at its edge. Click **Generate** to save the result.
 
 ### Check scale and dimensions
 
 In **Measure**, choose **Ruler**, **Angle**, or **Person**, then click in the viewport to place the points. You can snap to surfaces and mesh vertices, lock to an axis with **X / Y / Z**, and copy measurements as text.
 
 Tap and release **Ctrl** over the viewport to switch surface/vertex snapping. **Shift + X / Y / Z** locks to a plane; hold **Shift** while placing or dragging a point for slower cursor movement. In Person mode, the mouse wheel adjusts the figure's height.
+
+Enable the magnifier to see the area around the target point enlarged while placing or adjusting measurements. Use it together with snapping and slower cursor movement to align points precisely with object edges.
 
 ### Turn clutter into editable nodes
 
@@ -81,6 +93,8 @@ Select clutter or cluster nodes in the World Hierarchy, choose whether to disabl
 Open **Baker** and add the high-poly and low-poly nodes in the **Models** tab. Prepare a unique low-poly UV0 layout, choose the output maps and resolution, set the frontal/rear cage distances, then click **Bake**. Textures are saved beside the low-poly mesh asset, and its material is created or updated.
 
 Use **As rendered** for layered materials and material graphs. **Groups** separates matching parts; **Fit cage** adjusts projection distances per part. Disable maps you want to keep when re-baking.
+
+Enable **Show Cage** to inspect the projection shell directly in the viewport. **Fit Cage** tightens per-part distances within the global limits. Hold **− Shrink Front** or **+ Grow Front** to smoothly adjust the frontal distance: the buttons affect parts selected in the list, or all parts when none are selected. **Reset To Global** clears individual distance overrides.
 
 ## A few useful details
 

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<asset version="2.22.0.0">
+	<guid>df8fd8c561164abea8d818a3801de3904828d8e9</guid>
+	<type>material</type>
+	<hash>ed0e7c403b0759d5a8586a071cd6855503c3b110b4d312e189f78580f6f0ea15</hash>
+	<runtimes>
+		<runtime id="df8fd8c561164abea8d818a3801de3904828d8e9" name="road_decal" link="0" type="5"/>
+	</runtimes>
+	<parameters>
+		<parameter type="bool" name="unchanged">1</parameter>
+	</parameters>
+</asset>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<asset version="2.22.0.0">
+	<guid>54149052674c7d650318282c8bb2ba36a829f9b0</guid>
+	<type>material</type>
+	<hash>9552d3b5583e7cd8d590b32db7fd63df32fb244fc74fbe6543e95b794b6ebd1f</hash>
+	<runtimes>
+		<runtime id="54149052674c7d650318282c8bb2ba36a829f9b0" name="road_mesh" link="0" type="5"/>
+	</runtimes>
+	<parameters>
+		<parameter type="bool" name="unchanged">1</parameter>
+	</parameters>
+</asset>
