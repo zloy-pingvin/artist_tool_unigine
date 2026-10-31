@@ -88,6 +88,14 @@ private:
 	void restoreSettings();
 	void runBake();
 	void abortCapture(const QString &reason);
+	// The captures did not happen: stops the bake with an error, nothing is written.
+	void failCapture(const char *what);
+	// The captures need the frames of the engine, which by default stop while the editor is
+	// out of focus: background update is on while they are made, then back as it was.
+	void keep_engine_running(bool keep);
+	int backgroundUpdateBefore_ = -1; // what was changed; -1 = nothing is
+	// Turns the nodes Hide turned off on or off again, without forgetting them.
+	void put_hidden_nodes(bool enabled);
 
 	void performCaptures();
 
@@ -128,6 +136,7 @@ private:
 	int progressBase_ = 0;
 	bool captureStarted_ = false;
 	bool captureKicked_ = false;
+	bool captureFailed_ = false; // a surface that has an unwrap could not be captured
 	// warm-up render pass before the real captures: triggers texture streaming
 	// and shader compilation, then waits for them to settle
 	bool warmupDone_ = false;
@@ -206,8 +215,8 @@ private:
 	// The single place the capture-size policy lives, so the label under the
 	// window and the bake itself can never disagree. Returns the size in texels
 	// and, optionally, the numbers behind it.
-	// System RAM a capture takes per texel of a surface: 3 RGBA8 images, 4 with the emission,
-	// and a coverage byte.
+	// System RAM a capture takes per texel of a surface: 3 RGBA8 images, an RGBA16F one with
+	// the emission, and a coverage byte.
 	double ramBytesPerTexel() const;
 	int computeCaptureSize(int surfaceCount, CaptureBudget *outBudget = nullptr) const;
 	void updateCaptureInfo();

@@ -65,9 +65,11 @@ bool make_view(const QWidget *viewport, const QPointF &mouse, View &view)
 	if (!view.player)
 		return false;
 
-	view.width = qMax(1, viewport->width());
-	view.height = qMax(1, viewport->height());
-	view.mouse = Math::ivec2(qRound(mouse.x()), qRound(mouse.y()));
+	// In the pixels of the picture, as the editor does it.
+	const QPointF scene_mouse = viewportScenePosition(viewport, mouse);
+	view.width = qMax(1, window->getWidth());
+	view.height = qMax(1, window->getHeight());
+	view.mouse = Math::ivec2(qRound(scene_mouse.x()), qRound(scene_mouse.y()));
 	view.camera = view.player->getWorldPosition();
 
 	const int radius = qMax(1, int(float(qMax(view.width, view.height)) * SNAP_RADIUS));
@@ -109,27 +111,6 @@ Math::BoundFrustum local_frustum(const View &view, const Math::Mat4 &transform)
 {
 	const Math::mat4 camera_local(Math::inverse(transform) * view.player->getWorldTransform());
 	return Math::BoundFrustum(view.frustum, Math::inverse4(camera_local));
-}
-
-// Whether the surface is drawn in the view at this distance: the camera sees it (its
-// viewport mask: a mesh that only casts the shadow is not seen), and its visibility and
-// fade distances.
-bool is_surface_visible(const ObjectPtr &object, int surface, float distance, int viewport_mask)
-{
-	if (!object->isEnabled(surface) || (object->getViewportMask(surface) & viewport_mask) == 0)
-		return false;
-
-	const float min_visible = object->getMinVisibleDistance(surface);
-	const float max_visible = object->getMaxVisibleDistance(surface);
-	const float min_fade = object->getMinFadeDistance(surface);
-	const float max_fade = object->getMaxFadeDistance(surface);
-
-	float fade = 1.0f;
-	if (distance < min_visible + min_fade)
-		fade = Math::saturate(1.0f - (min_visible + min_fade - distance) / Math::max(min_fade, Math::Consts::EPS));
-	else if (distance > max_visible)
-		fade = Math::saturate(1.0f - (distance - max_visible) / Math::max(max_fade, Math::Consts::EPS));
-	return fade >= Math::Consts::EPS;
 }
 
 // The objects a world clutter makes are not snapped to, as in the editor.
@@ -178,9 +159,9 @@ bool consider(const View &view, const ObjectPtr &object, const Math::Mat4 &trans
 }
 
 // The vertices of a mesh placed with 'transform': a static mesh, or one instance of a
-// cluster.
+// cluster. 'distance' is what counts for its surfaces being drawn (see isSurfaceDrawn()).
 void collect_mesh(const View &view, const ObjectPtr &object, const ConstMeshPtr &mesh,
-	const Math::Mat4 &transform, Scratch &scratch, Vector<Candidate> &candidates)
+	const Math::Mat4 &transform, float distance, Scratch &scratch, Vector<Candidate> &candidates)
 {
 	Math::BoundFrustum frustum = local_frustum(view, transform);
 	if (!frustum.insideValidFast(mesh->getBoundBox()))
@@ -189,13 +170,12 @@ void collect_mesh(const View &view, const ObjectPtr &object, const ConstMeshPtr 
 	if (!mesh->getSurfaceCollision(frustum, scratch.surfaces))
 		return;
 
-	const float distance = float(Math::length(transform.getTranslate() - view.camera)) / Render::getDistanceScale();
 	// Normals go to world space by the inverse transpose, as in raycastSurface().
 	const Math::mat3 normal_transform = Math::transpose(Math::mat3(Math::mat4(Math::inverse(transform))));
 
 	for (int surface : scratch.surfaces)
 	{
-		if (surface >= object->getNumSurfaces() || !is_surface_visible(object, surface, distance, view.player->getViewportMask()))
+		if (surface >= object->getNumSurfaces() || !isSurfaceDrawn(object, surface, distance, view.player->getViewportMask()))
 			continue;
 		scratch.triangles.clear();
 		if (!mesh->getTriangleCollision(frustum, scratch.triangles, surface))
@@ -253,7 +233,7 @@ void collect_dynamic(const View &view, const ObjectMeshDynamicPtr &object, Vecto
 
 	const Math::Mat4 transform = object->getWorldTransform();
 	Math::BoundFrustum frustum = local_frustum(view, transform);
-	const float distance = float(Math::length(transform.getTranslate() - view.camera)) / Render::getDistanceScale();
+	const float distance = surfaceDrawDistance(object, view.camera);
 	const Math::mat3 normal_transform = Math::transpose(Math::mat3(Math::mat4(Math::inverse(transform))));
 
 	const ObjectMeshDynamic::Vertex *vertices = object->getVertexArray();
@@ -264,7 +244,7 @@ void collect_dynamic(const View &view, const ObjectMeshDynamicPtr &object, Vecto
 
 	for (int surface = 0, num = object->getNumSurfaces(); surface < num; ++surface)
 	{
-		if (!frustum.insideValidFast(object->getBoundBox(surface)) || !is_surface_visible(object, surface, distance, view.player->getViewportMask()))
+		if (!frustum.insideValidFast(object->getBoundBox(surface)) || !isSurfaceDrawn(object, surface, distance, view.player->getViewportMask()))
 			continue;
 
 		scratch.visited.clear();
@@ -331,7 +311,7 @@ VertexHit findVertex(const QWidget *viewport, const QPointF &mouse)
 				// A mesh that is not in memory yet starts loading and is there a frame
 				// or two later.
 				if (const ConstMeshPtr mesh = mesh_object->getMeshAsyncRAM())
-					collect_mesh(view, object, mesh, object->getWorldTransform(), scratch, candidates);
+					collect_mesh(view, object, mesh, object->getWorldTransform(), surfaceDrawDistance(object, view.camera), scratch, candidates);
 				break;
 			}
 			case Node::OBJECT_MESH_CLUSTER:
@@ -355,7 +335,9 @@ VertexHit findVertex(const QWidget *viewport, const QPointF &mouse)
 					const float world_radius = radius * Math::max(scale.x, Math::max(scale.y, scale.z));
 					if (!world_frustum.inside(world_center, Math::Scalar(world_radius)))
 						continue;
-					collect_mesh(view, object, mesh, transform, scratch, candidates);
+					// The engine counts the distance of an instance to its pivot.
+					const float distance = float(Math::length(transform.getTranslate() - view.camera)) / Render::getDistanceScale();
+					collect_mesh(view, object, mesh, transform, distance, scratch, candidates);
 				}
 				break;
 			}

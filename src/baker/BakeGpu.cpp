@@ -517,17 +517,30 @@ static void dilateCaptures(const std::vector<ImagePtr> &images,
 		*outCoverage = std::move(mask);
 }
 
+bool isSurfaceCapturable(const Ptr<ObjectMeshStatic> &obj, int surface)
+{
+	const MaterialPtr material = obj ? obj->getMaterial(surface) : MaterialPtr();
+	if (!material)
+		return true;
+	const int transparent = material->getTransparent();
+	return transparent == Material::TRANSPARENT_NONE || transparent == Material::TRANSPARENT_ALPHA_TEST;
+}
+
 PendingCapturePtr requestSurfaceCapture(const Ptr<ObjectMeshStatic> &obj, const Ptr<ConstMesh> &mesh,
-	int surface, int size, int uvChannelMode, bool captureEmission)
+	int surface, int size, int uvChannelMode, bool captureEmission, bool *noUnwrap)
 {
 	PendingCapturePtr result; // null = failure
+	if (noUnwrap)
+		*noUnwrap = false;
 
 	const int numT = mesh->getNumTexCoords0(surface);
-	if (numT <= 0)
-		return result;
 	const Vector<int> &tind = mesh->getTIndices(surface);
-	if (tind.size() < 3)
+	if (numT <= 0 || tind.size() < 3)
+	{
+		if (noUnwrap)
+			*noUnwrap = true;
 		return result;
+	}
 
 	const int numT1 = mesh->getNumTexCoords1(surface);
 	const int numCol = mesh->getNumColors(surface);
@@ -578,6 +591,8 @@ PendingCapturePtr requestSurfaceCapture(const Ptr<ObjectMeshStatic> &obj, const 
 	if (!sel.valid)
 	{
 		Log::warning("Baker: surface %d has no usable UV charts, skipping GPU capture\n", surface);
+		if (noUnwrap)
+			*noUnwrap = true;
 		return result;
 	}
 
@@ -732,14 +747,18 @@ PendingCapturePtr requestSurfaceCapture(const Ptr<ObjectMeshStatic> &obj, const 
 	camera->setProjection(ortho(-0.5f, 0.5f, -0.5f, 0.5f, 0.1f, 10.0f));
 	camera->setModelview(inverse(Mat4(translate(vec3(0.5f, -0.5f, quadZ + 1.0f)))));
 
+	// The emission is read from this image: HDR and linear (no sRGB at the final copy), as
+	// the emission pass adds it up. 8 bits would cut everything brighter than 1, and the
+	// bake could not bring it back through emission_scale.
 	TexturePtr rt = Texture::create();
-	rt->create2D(size, size, Texture::FORMAT_RGBA8,
+	rt->create2D(size, size, captureEmission ? Texture::FORMAT_RGBA16F : Texture::FORMAT_RGBA8,
 		Texture::SAMPLER_FILTER_LINEAR | Texture::FORMAT_USAGE_RENDER);
 
 	ViewportPtr viewport = Viewport::create();
 	viewport->setSkipFlags(Viewport::SKIP_TRANSPARENT | Viewport::SKIP_VELOCITY_BUFFER
 		| Viewport::SKIP_POSTEFFECTS | Viewport::SKIP_VISUALIZER
-		| Viewport::SKIP_AUTO_EXPOSURE | Viewport::SKIP_AUTO_WHITE_BALANCE);
+		| Viewport::SKIP_AUTO_EXPOSURE | Viewport::SKIP_AUTO_WHITE_BALANCE
+		| (captureEmission ? int(Viewport::SKIP_SRGB) : 0));
 	viewport->setEnvironmentTexture(Render::getBlackCubeTexture());
 	// no world lights: with the black environment the final image of this render
 	// then contains the emission pass output alone (the emission capture source)

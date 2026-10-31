@@ -26,6 +26,7 @@
 #include <QHash>
 #include <QImage>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QPainter>
@@ -310,6 +311,44 @@ bool isEscapeFree(QObject *watched)
 		}
 	}
 	return true;
+}
+
+int latinKey(const QKeyEvent *key)
+{
+#ifdef _WIN32
+	// The virtual key of a letter is the code of its capital, the same as Qt::Key_A to Qt::Key_Z.
+	const quint32 virtual_key = key->nativeVirtualKey();
+	if (virtual_key >= 0x41 && virtual_key <= 0x5A)
+		return int(virtual_key);
+#endif
+	return key->key();
+}
+
+bool isTypingInField(QObject *watched)
+{
+	if (QApplication::activeModalWidget() || QApplication::activePopupWidget())
+		return true;
+	for (QObject *object : {watched, static_cast<QObject *>(QApplication::focusWidget())})
+	{
+		if (const QLineEdit *line = qobject_cast<const QLineEdit *>(object))
+		{
+			if (!line->isReadOnly())
+				return true;
+		}
+		if (const QTextEdit *text = qobject_cast<const QTextEdit *>(object))
+		{
+			if (!text->isReadOnly())
+				return true;
+		}
+		if (const QPlainTextEdit *text = qobject_cast<const QPlainTextEdit *>(object))
+		{
+			if (!text->isReadOnly())
+				return true;
+		}
+		if (qobject_cast<QAbstractSpinBox *>(object))
+			return true;
+	}
+	return false;
 }
 
 QString axisColor(int axis)

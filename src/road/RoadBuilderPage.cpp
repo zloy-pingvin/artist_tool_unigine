@@ -2133,6 +2133,10 @@ void RoadBuilderPage::refresh()
 	if (QAbstractButton *button = output_->button(settings.output))
 		button->setChecked(true);
 	show_value(decal_depth_, settings.decal_depth);
+	// A mesh may be sunk into the ground, a decal is only lifted (see limited()). Before the
+	// value: a limit left from a decal would cut the negative lift of a mesh in the field,
+	// and the next change of any setting would write that into the road.
+	decal_lift_->setMinimum(decal ? 0.0 : -100.0);
 	// The field is of the output shown: switched to another one, it gets that one's lift
 	// even while it is being typed in (else it would be written into the other output).
 	const float lift = settings.output == ROAD_OUTPUT_DECAL ? settings.decal_lift : settings.ground_offset;
@@ -2163,8 +2167,6 @@ void RoadBuilderPage::refresh()
 		widget->setVisible(!bent);
 	for (QWidget *widget : lift_row_)
 		widget->setVisible(!bent);
-	// A mesh may be sunk into the ground, a decal is only lifted (see limited()).
-	decal_lift_->setMinimum(decal ? 0.0 : -100.0);
 	for (QWidget *widget : decal_rows_)
 		widget->setVisible(decal);
 	for (QWidget *widget : material_rows_)

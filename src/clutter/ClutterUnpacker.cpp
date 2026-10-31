@@ -509,9 +509,10 @@ void ClutterUnpacker::bake_tick()
 	if (bake_.phase == BakeState::PHASE_IDLE || bake_.phase == BakeState::PHASE_FINISH)
 		return;
 
-	if (bake_.clutter.isDeleted())
+	// Removed with its world, or in the editor: Delete and the undo of its creation keep the
+	// node for the undo, not deleted, and it must not come on again or be unpacked.
+	if (!isNodeAlive(bake_.clutter))
 	{
-		bake_.clutter = WorldClutterPtr();
 		restore_bake_state(false);
 		emit message(MSG_ERROR, uiText("The clutter was removed during the bake.", "Клаттер был удалён во время распаковки."));
 		node_done(false, 0);
@@ -571,9 +572,8 @@ void ClutterUnpacker::finish_world_clutter_bake()
 	if (!busy_ || bake_.phase != BakeState::PHASE_FINISH)
 		return;
 
-	if (bake_.clutter.isDeleted())
+	if (!isNodeAlive(bake_.clutter))
 	{
-		bake_.clutter = WorldClutterPtr();
 		restore_bake_state(false);
 		emit message(MSG_ERROR, uiText("The clutter was removed during the bake.", "Клаттер был удалён во время распаковки."));
 		node_done(false, 0);
@@ -746,7 +746,7 @@ void ClutterUnpacker::finish_world_clutter_bake()
 
 void ClutterUnpacker::before_world_save(const char *)
 {
-	if (!bake_.clutter || bake_.clutter.isDeleted())
+	if (!isNodeAlive(bake_.clutter))
 		return;
 	bake_.clutter->setSpawnRate(bake_.saved_spawn_rate);
 	bake_.clutter->setVisibleDistance(bake_.saved_visible_distance);
@@ -756,7 +756,7 @@ void ClutterUnpacker::before_world_save(const char *)
 
 void ClutterUnpacker::after_world_save(const char *)
 {
-	if (!bake_.clutter || bake_.clutter.isDeleted())
+	if (!isNodeAlive(bake_.clutter))
 		return;
 	bake_.clutter->setSpawnRate(bake_.bake_spawn_rate);
 	bake_.clutter->setVisibleDistance(bake_.bake_visible_distance);
@@ -773,7 +773,9 @@ void ClutterUnpacker::restore_bake_state(bool restore_enabled)
 	{
 		bake_.clutter->setSpawnRate(bake_.saved_spawn_rate);
 		bake_.clutter->setVisibleDistance(bake_.saved_visible_distance);
-		if (restore_enabled && bake_.disabled_by_bake)
+		// A clutter removed in the editor stays off, its undo turns it on: the settings above it
+		// gets back all the same, for that undo.
+		if (restore_enabled && bake_.disabled_by_bake && isNodeAlive(bake_.clutter))
 			bake_.clutter->setEnabled(true);
 	}
 	Render::setForceStreaming(bake_.saved_force_streaming);

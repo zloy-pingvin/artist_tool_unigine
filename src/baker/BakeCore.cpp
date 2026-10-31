@@ -1,5 +1,6 @@
 #include "BakeCore.h"
 #include "BakeGpu.h"
+#include "UndoActions.h"
 
 #include <UnigineDecals.h>
 #include <UnigineEngine.h>
@@ -24,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -37,6 +39,18 @@ namespace BakeCore
 
 namespace
 {
+
+// A name of its own in the temp folder: another editor may be baking at the same time. Empty if
+// there is no such folder.
+std::filesystem::path unique_temp_path(const char *name)
+{
+	std::error_code ec;
+	const std::filesystem::path folder = std::filesystem::temp_directory_path(ec);
+	if (ec)
+		return std::filesystem::path();
+	std::random_device random;
+	return folder / ("baker_" + std::to_string(random()) + "_" + std::to_string(random()) + name);
+}
 
 //------------------------------------------------------------------------------
 // Path helpers (virtual, forward-slash paths).
@@ -389,6 +403,24 @@ vec3 srgbToLinear(const vec3 &c)
 	return vec3(srgbToLinear(c.x), srgbToLinear(c.y), srgbToLinear(c.z));
 }
 
+// A pixel of the HDR emission capture, by Image::get2D(uv)'s mapping. It is blended here:
+// get2D(uv) blends the pixels of a half-float image by their raw bits.
+vec4 sampleHalfFloat(const ImagePtr &image, const vec2 &uv)
+{
+	const int w = image->getWidth(), h = image->getHeight();
+	const float x = uv.x * float(w - 1);
+	const float y = uv.y * float(h - 1);
+	const int x0 = Math::clamp(int(Math::floor(x)), 0, w - 1);
+	const int y0 = Math::clamp(int(Math::floor(y)), 0, h - 1);
+	const int x1 = Math::min(x0 + 1, w - 1);
+	const int y1 = Math::min(y0 + 1, h - 1);
+	const float fx = x - float(x0);
+	const float fy = y - float(y0);
+	const vec4 top = image->toVec4(image->get2D(x0, y0)) * (1.0f - fx) + image->toVec4(image->get2D(x1, y0)) * fx;
+	const vec4 bottom = image->toVec4(image->get2D(x0, y1)) * (1.0f - fx) + image->toVec4(image->get2D(x1, y1)) * fx;
+	return top * (1.0f - fy) + bottom * fy;
+}
+
 QuantizedPos quantize(const vec3 &p)
 {
 	const double q = 1.0 / 1e-5; // 0.01 mm cells
@@ -629,6 +661,7 @@ struct DecalSample
 	vec3 bbMin, bbMax;        // world bbox for the per-texel cull
 	ImagePtr albedo, normal, shading;
 	vec4 albedoColor{1.0f, 1.0f, 1.0f, 1.0f};
+	vec4 uvTransform{1.0f, 1.0f, 0.0f, 0.0f}; // of the material: uv * xy + zw, as the decal shader
 	float opacity = 1.0f;
 	bool normalInvertG = false;
 	int order = 0;
@@ -845,6 +878,8 @@ std::vector<DecalSample> collectDecals(const Vec3 &origin, const vec3 &hiMin, co
 		{
 			if (m->findParameter("albedo_color") >= 0)
 				s.albedoColor = m->getParameterFloat4("albedo_color");
+			if (m->findParameter("uv_transform") >= 0)
+				s.uvTransform = m->getParameterFloat4("uv_transform");
 			s.albedo = loadTexture(m->getTexturePath("albedo"), textureCache);
 			s.shading = loadTexture(m->getTexturePath("shading"), textureCache);
 			s.normal = loadTexture(m->getTexturePath("normal"), textureCache);
@@ -931,6 +966,15 @@ int applyDecals(const std::vector<DecalSample> &decals, const vec3 &worldHit, ve
 				continue;
 			// texture UV in the decal (V flipped for Image::get2D row order)
 			uv = vec2(ndc.x * 0.5f + 0.5f, 1.0f - (ndc.y * 0.5f + 0.5f));
+		}
+
+		// a sticker of an atlas, a tiled decal: the UV transform of the material, wrapped
+		// into [0..1) as the textures of the surfaces are
+		if (d.uvTransform.x != 1.0f || d.uvTransform.y != 1.0f || d.uvTransform.z != 0.0f || d.uvTransform.w != 0.0f)
+		{
+			uv = vec2(uv.x * d.uvTransform.x + d.uvTransform.z, uv.y * d.uvTransform.y + d.uvTransform.w);
+			uv.x -= Math::floor(uv.x);
+			uv.y -= Math::floor(uv.y);
 		}
 
 		// surface must face the projector (projector shoots along -axisZ)
@@ -1050,7 +1094,10 @@ Result bake(const std::vector<BakeGroup> &groups,
 		continue;
 	}
 	mat4 highTm = relativeTransform(high->getWorldTransform(), origin);
-	mat3 highNm = transpose(inverse(mat3(highTm)));
+	// the normals and tangents go by the transform itself, as the mesh vertex shader takes
+	// them (see vertex.h), not by its inverse transpose: on a non-uniform scale the two differ,
+	// and the map must hold what the renderer shows
+	const mat3 highBasis = mat3(highTm);
 	const int surfBase = int(srcSurfaces.size());
 	srcSurfaces.resize(surfBase + highMesh->getNumSurfaces());
 
@@ -1144,8 +1191,8 @@ Result bake(const std::vector<BakeGroup> &groups,
 		for (int i = 0; i < numT; i++)
 		{
 			quat q = highMesh->getTangent(i, ls);
-			surf.n[i] = normalize(highNm * q.getNormal());
-			surf.t[i] = normalize(highNm * q.getTangent());
+			surf.n[i] = normalize(highBasis * q.getNormal());
+			surf.t[i] = normalize(highBasis * q.getTangent());
 			surf.sw[i] = (q.w < 0.0f) ? -1.0f : 1.0f;
 		}
 
@@ -1238,7 +1285,8 @@ Result bake(const std::vector<BakeGroup> &groups,
 		// A mirrored part (negative scale) has its triangles wound the other way: the
 		// face normals of the cage are flipped for it, or the cage would go inward.
 		const bool lowMirrored = mat3(lowTm).determinant() < 0.0f;
-		mat3 lowNm = transpose(inverse(mat3(lowTm)));
+		// by the transform itself, as for the high-poly: the frame the renderer decodes the map in
+		const mat3 lowBasis = mat3(lowTm);
 
 		// this part's cage: its own override if it has one, else the global pair
 		vec2 partCage(Math::max(settings.frontalDistance, 1e-5f),
@@ -1273,12 +1321,12 @@ Result bake(const std::vector<BakeGroup> &groups,
 				quat q0 = lowMesh->getTangent(i0, s);
 				quat q1 = lowMesh->getTangent(i1, s);
 				quat q2 = lowMesh->getTangent(i2, s);
-				tr.n0 = normalize(lowNm * q0.getNormal());
-				tr.n1 = normalize(lowNm * q1.getNormal());
-				tr.n2 = normalize(lowNm * q2.getNormal());
-				tr.t0 = normalize(lowNm * q0.getTangent());
-				tr.t1 = normalize(lowNm * q1.getTangent());
-				tr.t2 = normalize(lowNm * q2.getTangent());
+				tr.n0 = normalize(lowBasis * q0.getNormal());
+				tr.n1 = normalize(lowBasis * q1.getNormal());
+				tr.n2 = normalize(lowBasis * q2.getNormal());
+				tr.t0 = normalize(lowBasis * q0.getTangent());
+				tr.t1 = normalize(lowBasis * q1.getTangent());
+				tr.t2 = normalize(lowBasis * q2.getTangent());
 				tr.signW = (q0.w < 0.0f) ? -1.0f : 1.0f;
 				tr.uv0 = lowMesh->getTexCoord0(i0, s);
 				tr.uv1 = lowMesh->getTexCoord0(i1, s);
@@ -1678,10 +1726,11 @@ Result bake(const std::vector<BakeGroup> &groups,
 								shading = vec4(s4.x, n4.w, s4.y, s4.w);
 								if (surf.gpu.emission)
 								{
-									vec4 e4 = surf.gpu.emission->toVec4(surf.gpu.emission->get2D(cuv));
-									// the capture exists for every surface, so the
+									// linear already and can be above 1 (BakeGpu::SurfaceCapture::emission).
+									// The capture exists for every surface, so the
 									// material's emission state decides the mask
-									emission = vec4(srgbToLinear(e4.xyz), surf.emissionOn ? 1.0f : 0.0f);
+									const vec4 e4 = sampleHalfFloat(surf.gpu.emission, cuv);
+									emission = vec4(e4.xyz, surf.emissionOn ? 1.0f : 0.0f);
 								}
 
 								vec3 ts = BakeGpu::unpackGBufferNormal(n4);
@@ -2070,6 +2119,79 @@ Result bake(const std::vector<BakeGroup> &groups,
 	//--------------------------------------------------------------------------
 	// Write images.
 	//--------------------------------------------------------------------------
+	// To temp files first; the old maps go only when all the new ones are there. A map that can not be
+	// written leaves the set as it was: a material must not get old maps and new ones mixed.
+	namespace fs = std::filesystem;
+	struct WrittenMap
+	{
+		fs::path temp;
+		fs::path target;
+		String *out;
+		String virtualPath;
+	};
+	std::vector<WrittenMap> writtenMaps;
+	const auto removeTemps = [&writtenMaps]() {
+		std::error_code ec;
+		for (const WrittenMap &map : writtenMaps)
+			fs::remove(map.temp, ec);
+		writtenMaps.clear();
+	};
+	const auto failWriting = [&](const char *msg) -> Result & {
+		removeTemps();
+		return fail(msg);
+	};
+	// What can not be replaced puts back those already replaced.
+	const auto replaceMaps = [&writtenMaps]() -> bool {
+		std::vector<fs::path> oldCopies(writtenMaps.size());
+		const auto removeOldCopies = [&oldCopies]() {
+			std::error_code ec;
+			for (const fs::path &copy : oldCopies)
+				if (!copy.empty())
+					fs::remove(copy, ec);
+		};
+		for (size_t i = 0; i < writtenMaps.size(); i++)
+		{
+			std::error_code ec;
+			if (!fs::exists(writtenMaps[i].target, ec))
+				continue;
+			oldCopies[i] = writtenMaps[i].temp;
+			oldCopies[i] += ".old";
+			fs::copy_file(writtenMaps[i].target, oldCopies[i], fs::copy_options::overwrite_existing, ec);
+			if (ec)
+			{
+				Log::error("Baker: failed to keep a copy of \"%s\": %s\n", writtenMaps[i].target.u8string().c_str(), ec.message().c_str());
+				removeOldCopies();
+				return false;
+			}
+		}
+		for (size_t i = 0; i < writtenMaps.size(); i++)
+		{
+			std::error_code ec;
+			fs::copy_file(writtenMaps[i].temp, writtenMaps[i].target, fs::copy_options::overwrite_existing, ec);
+			if (!ec)
+				continue;
+			Log::error("Baker: failed to copy texture to \"%s\": %s\n", writtenMaps[i].target.u8string().c_str(), ec.message().c_str());
+			for (size_t back = 0; back <= i; back++)
+			{
+				std::error_code backError;
+				if (!oldCopies[back].empty())
+					fs::copy_file(oldCopies[back], writtenMaps[back].target, fs::copy_options::overwrite_existing, backError);
+				else
+					fs::remove(writtenMaps[back].target, backError);
+				if (backError)
+					Log::error("Baker: failed to put \"%s\" back: %s\n", writtenMaps[back].target.u8string().c_str(), backError.message().c_str());
+			}
+			removeOldCopies();
+			return false;
+		}
+		removeOldCopies();
+		for (const WrittenMap &map : writtenMaps)
+		{
+			*map.out = map.virtualPath;
+			Log::message("Baker: saved \"%s\"\n", map.target.u8string().c_str());
+		}
+		return true;
+	};
 	auto writeImage = [&](const char *postfix, int channels, const std::vector<float> &data,
 						  int stride, String &outVirtual, bool sixteenBit = false) -> bool {
 		ImagePtr img = Image::create();
@@ -2091,29 +2213,21 @@ Result bake(const std::vector<BakeGroup> &groups,
 		// Image::save() on a path of an already imported asset is intercepted by the
 		// engine virtual file system and written into the .runtimes copy instead of
 		// the source file. Save to an OS temp file and copy over via the OS instead.
-		namespace fs = std::filesystem;
-		std::error_code ec;
-		fs::path tmpPath = fs::temp_directory_path(ec) / (String(baseName + postfix).get() + std::string("_baker_tmp.png"));
-		if (ec)
+		// The name in ASCII (the name of the set may be in any language), the path for the
+		// engine in UTF-8: path::string() gives the ANSI code page of Windows, and a user
+		// folder in Cyrillic or a Cyrillic set name would not be found by the other side.
+		const fs::path tmpPath = unique_temp_path((std::string(postfix) + "_tmp.png").c_str());
+		if (tmpPath.empty())
 		{
-			Log::error("Baker: temp dir unavailable: %s\n", ec.message().c_str());
+			Log::error("Baker: temp dir unavailable\n");
 			return false;
 		}
-		if (!img->save(tmpPath.string().c_str()))
+		if (!img->save(tmpPath.u8string().c_str()))
 		{
-			Log::error("Baker: failed to save \"%s\"\n", tmpPath.string().c_str());
+			Log::error("Baker: failed to save \"%s\"\n", tmpPath.u8string().c_str());
 			return false;
 		}
-		fs::copy_file(tmpPath, fs::u8path(absPath.get()), fs::copy_options::overwrite_existing, ec);
-		std::error_code ec2;
-		fs::remove(tmpPath, ec2);
-		if (ec)
-		{
-			Log::error("Baker: failed to copy texture to \"%s\": %s\n", absPath.get(), ec.message().c_str());
-			return false;
-		}
-		Log::message("Baker: saved \"%s\"\n", absPath.get());
-		outVirtual = virtualDir + fileName;
+		writtenMaps.push_back({tmpPath, fs::u8path(absPath.get()), &outVirtual, virtualDir + fileName});
 		return true;
 	};
 
@@ -2124,12 +2238,12 @@ Result bake(const std::vector<BakeGroup> &groups,
 	if (settings.bakeAlbedo)
 	{
 		if (!writeImage("_alb", 4, accAlbedo, 4, result.albedoPath))
-			return fail("Failed to save the albedo texture.");
+			return failWriting("Failed to save the albedo texture.");
 	}
 	if (settings.bakeShading)
 	{
 		if (!writeImage("_sh", 4, accShading, 4, result.shadingPath))
-			return fail("Failed to save the shading texture (_sh).");
+			return failWriting("Failed to save the shading texture (_sh).");
 	}
 	if (settings.bakeEmission)
 	{
@@ -2145,7 +2259,7 @@ Result bake(const std::vector<BakeGroup> &groups,
 			for (int c = 0; c < 3; c++)
 				accEmission[i + c] = linearToSrgb(Math::clamp(accEmission[i + c] / divide, 0.0f, 1.0f));
 		if (!writeImage("_e", 4, accEmission, 4, result.emissionPath))
-			return fail("Failed to save the emission texture (_e).");
+			return failWriting("Failed to save the emission texture (_e).");
 	}
 
 	// normal: encode from [-1..1] to [0..1]
@@ -2165,8 +2279,12 @@ Result bake(const std::vector<BakeGroup> &groups,
 			encoded[i * 3 + 2] = n.z * 0.5f + 0.5f;
 		}
 		if (!writeImage("_n", 3, encoded, 3, result.normalPath, true))
-			return fail("Failed to save the normal map.");
+			return failWriting("Failed to save the normal map.");
 	}
+
+	if (!replaceMaps())
+		return failWriting("Failed to write the baked textures: the old ones stay.");
+	removeTemps();
 
 	progress(100, "Done");
 	result.success = true;
@@ -2211,65 +2329,92 @@ void assignMaterial(const std::vector<BakeGroup> &groups, Result &result)
 		&& !strcmp(baseName.get() + baseName.size() - suffixLen, source->suffix))
 		baseName = baseName.substr(0, baseName.size() - int(suffixLen));
 
-	MaterialPtr mat = firstLow->getMaterial(0);
-	// A material the high-poly uses too (one imported material for both, a mesh baked onto
-	// itself) is not baked into: the high-poly would show the baked maps, and a re-bake
-	// would read its own output. The low-poly gets a material of its own then.
-	bool sharedWithHigh = false;
-	if (mat && !mat->isBase())
+	// The maps go only into the material the Baker made for this set, <name>_baked.mat. Any
+	// other material may be used by other objects of the project and is not touched on disk.
+	// A material of a previous bake is told by the maps of this set in it, and is used again. A file of
+	// that name without them is somebody else's, made by hand: the next free name is taken then.
+	const auto has_maps_of_set = [&baseName](const MaterialPtr &material) {
+		const char *const map_slots[][2] = {{"albedo", "_alb"}, {"shading", "_sh"}, {"normal", "_n"}, {"emission", "_e"}};
+		for (const auto &slot : map_slots)
+		{
+			if (material->findTexture(slot[0]) < 0)
+				continue;
+			const String current = resolveAssetPath(material->getTexturePath(slot[0]));
+			if (!current.empty() && pathBaseName(current) == baseName + slot[1])
+				return true;
+		}
+		return false;
+	};
+	String matPath;
+	MaterialPtr mat;
+	for (int number = 1;; number++)
 	{
-		for (const BakeGroup &g : groups)
-			for (const Ptr<ObjectMeshStatic> &high : g.highs)
-				for (int s = 0; high && s < high->getNumSurfaces() && !sharedWithHigh; s++)
-				{
-					const MaterialPtr hm = high->getMaterial(s);
-					sharedWithHigh = hm && hm->getGUID() == mat->getGUID();
-				}
+		matPath = virtualDir + baseName + "_baked" + (number > 1 ? String::format("_%d", number) : String()) + ".mat";
+		mat = Materials::findMaterialByPath(matPath.get());
+		const bool exists = mat || FileSystem::isFileExist(matPath.get());
+		if (!mat && exists)
+			mat = Materials::loadMaterial(matPath.get());
+		if (!exists || (mat && has_maps_of_set(mat)))
+			break;
 	}
-	if (!mat || mat->isBase() || sharedWithHigh)
+	if (!mat || mat->isBase())
 	{
-		MaterialPtr base;
-		if (mat && mat->isBase())
-			base = mat;
-		if (!base)
-			base = Materials::findManualMaterial("mesh_base");
-		if (!base)
-			base = Materials::findManualMaterial("Unigine::mesh_base");
-		if (!base)
+		// The first bake of this set: the low-poly gets a material of its own, a child of the
+		// one it has, so that the maps left out of the bake and its settings stay. Not of a
+		// material the high-poly uses too (one imported material for both, a mesh baked onto
+		// itself): that one holds the look the bake has just taken over from the high-poly.
+		MaterialPtr parent = firstLow->getMaterial(0);
+		if (parent && !parent->isBase())
+		{
+			bool sharedWithHigh = false;
+			for (const BakeGroup &g : groups)
+				for (const Ptr<ObjectMeshStatic> &high : g.highs)
+					for (int s = 0; high && s < high->getNumSurfaces() && !sharedWithHigh; s++)
+					{
+						const MaterialPtr hm = high->getMaterial(s);
+						sharedWithHigh = hm && hm->getGUID() == parent->getGUID();
+					}
+			if (sharedWithHigh)
+				parent = MaterialPtr();
+		}
+		if (!parent)
+			parent = Materials::findManualMaterial("mesh_base");
+		if (!parent)
+			parent = Materials::findManualMaterial("Unigine::mesh_base");
+		if (!parent)
 		{
 			Log::error("Baker: the mesh_base base material was not found\n");
 			return;
 		}
-
-		String matPath = virtualDir + baseName + "_baked.mat";
-		// A material of a previous bake under this name is used again: a second material
-		// with the file of the first could not be registered, and would overwrite it.
-		MaterialPtr existing = Materials::findMaterialByPath(matPath.get());
-		if (!existing && FileSystem::isFileExist(matPath.get()))
-			existing = Materials::loadMaterial(matPath.get());
-		if (existing && !existing->isBase())
-			mat = existing;
-		else
+		mat = parent->inherit();
+		if (!mat || !mat->createMaterialFile(matPath.get()))
 		{
-			mat = base->inherit();
-			if (!mat->createMaterialFile(matPath.get()))
-				Log::warning("Baker: failed to create material file \"%s\"\n", matPath.get());
+			Log::error("Baker: failed to create material file \"%s\"\n", matPath.get());
+			return;
 		}
-		for (const BakeGroup &g : groups)
-			for (const Ptr<ObjectMeshStatic> &low : g.lows)
-				low->setMaterial(mat, "*");
-		result.materialPath = matPath;
 	}
+	result.materialPath = matPath;
+
+	// All the surfaces of all the parts share it (the other surfaces of the first part too:
+	// they may have other materials). A step of the history, which also tells the editor the
+	// world has changed: Ctrl+Z gives every surface the material it had; the files stay.
+	ArtistTool::SetMaterialsAction *assign = new ArtistTool::SetMaterialsAction;
+	for (const BakeGroup &g : groups)
+		for (const Ptr<ObjectMeshStatic> &low : g.lows)
+		{
+			bool changes = false;
+			for (int s = 0; s < low->getNumSurfaces() && !changes; s++)
+			{
+				const MaterialPtr current = low->getMaterial(s);
+				changes = !current || current->getGUID() != mat->getGUID();
+			}
+			if (changes)
+				assign->set(low, mat->getGUID());
+		}
+	if (assign->isEmpty())
+		delete assign;
 	else
-	{
-		// the first part already has an inherited material: bake into it and
-		// share it with all the surfaces of all the parts (the other surfaces of the
-		// first part too: they may have other materials)
-		for (const BakeGroup &g : groups)
-			for (const Ptr<ObjectMeshStatic> &low : g.lows)
-				low->setMaterial(mat, "*");
-		result.materialPath = mat->getFilePath();
-	}
+		::UnigineEditor::Undo::apply(assign);
 
 	// The maps are baked to the UV0 of the low-poly as it is: the tiling and the offset
 	// the material had would repeat or shift them. But it is one for all the maps of the
@@ -2634,8 +2779,8 @@ String createSkewMask(const Ptr<ObjectMeshStatic> &low, int size, String &error)
 
 		// same VFS workaround as the baked textures: save to an OS temp file and
 		// copy over, so the write lands in the asset file and not in .runtimes
-		fs::path tmpPath = fs::temp_directory_path(ec) / "baker_skew_tmp.png";
-		if (ec || !img->save(tmpPath.string().c_str()))
+		const fs::path tmpPath = unique_temp_path("_skew_tmp.png");
+		if (tmpPath.empty() || !img->save(tmpPath.u8string().c_str()))
 		{
 			error = "Failed to save the mask to a temporary file.";
 			return String();

@@ -10,6 +10,7 @@
 #include <editor/UnigineUndo.h>
 
 #include <UnigineEngine.h>
+#include <UnigineFileSystem.h>
 #include <UnigineLog.h>
 #include <UnigineNodes.h>
 #include <UnigineRender.h>
@@ -58,6 +59,61 @@ const float MIN_OBJECT_LENGTH = 0.01f;
 const double DIRECTION_PROBE = 0.05;
 const int MAX_FILL_OBJECTS = 5000;
 const int MAX_PATTERN_COUNT = 999;
+// How long after the last change the objects the live update has moved get their step of the
+// undo history: the editor makes its own step of that change when the mouse button is let go.
+const qint64 LIVE_STEP_DELAY_MS = 300;
+
+// The steps that have moved the objects (RearrangeStepAction) and are undone now: they
+// lie in the redo history, which any new step clears. While there are any, a change the mouse
+// does not make comes from an undo or a redo, and the live update does not answer it with a
+// step of its own: that would clear the redo history, and an undo would never get
+// past it. The objects go back and forth by their own steps then.
+int rearrange_steps_undone = 0;
+// Such a step has just been undone or redone: the objects are where it has put them.
+bool rearrange_step_replayed = false;
+
+// Goes last into a step that moves the objects: it tells the tool of the undo and the redo.
+class RearrangeStepAction final : public ::UnigineEditor::Action
+{
+public:
+	~RearrangeStepAction() override
+	{
+		if (undone_)
+			--rearrange_steps_undone;
+	}
+
+	void apply() override {}
+	void undo() override
+	{
+		undone_ = true;
+		++rearrange_steps_undone;
+		rearrange_step_replayed = true;
+	}
+	void redo() override
+	{
+		undone_ = false;
+		--rearrange_steps_undone;
+		rearrange_step_replayed = true;
+	}
+
+private:
+	bool undone_{false};
+	// Keeps the step among those of the plugin, see releaseUndoActions().
+	SetNodeDataAction counted_;
+};
+
+// The step of the objects: the scales they remember and their new places. The objects stand
+// where the step takes them from; takes 'scales'.
+void push_objects_step(SetNodeDataAction *scales, const Vector<NodePtr> &moved, const Vector<Math::Mat4> &moved_to)
+{
+	using namespace ::UnigineEditor;
+	Undo::begin();
+	SetNodeDataAction::push(scales, false);
+	for (int i = 0; i < moved.size(); ++i)
+		Undo::apply(new SetNodeTransformAction(moved[i], moved_to[i]));
+	Undo::apply(new RearrangeStepAction);
+	Undo::commit();
+}
 
 // The entries of the pattern of one role as the row they are placed in: every entry
 // is there as many times in a row as its count says.
@@ -218,8 +274,10 @@ void PathPlacer::shutdown()
 {
 	// A new line left without points is kept in the world, not removed: removing it is
 	// a step of the undo history, and the plugin resets the history right after it has
-	// shut down - a step pushed while it shuts down crashes the editor.
+	// shut down - a step pushed while it shuts down crashes the editor. The same goes for
+	// the step of what the live update has just moved.
 	discard_if_empty_ = false;
+	live_before_.clear();
 	setActive(false);
 }
 
@@ -237,9 +295,24 @@ void PathPlacer::setActive(bool active)
 		Engine::get()->getEventEndWorldUpdate().connect(connections_, this, &PathPlacer::update);
 		// Clicks on the points of the path are taken all the time the tool is active.
 		qApp->installEventFilter(this);
+		// What was changed while the tool was off is taken as it is: objects moved by hand
+		// are not moved back when the tool is merely opened again.
+		rearrange_step_replayed = false;
+		if (hasPath())
+		{
+			const char *data = root_->getData(SETTINGS_DATA);
+			if (QByteArray(data ? data : "") != saved_settings_)
+			{
+				load_settings();
+				editor_.setClosed(settings_.closed);
+			}
+			length_ = build_curve().length;
+			arranged_state_ = snapshot();
+		}
 		updateFromSelection();
 	} else
 	{
+		commit_live_step();
 		setAddingPoints(false);
 		editor_.reset();
 		qApp->removeEventFilter(this);
@@ -269,6 +342,7 @@ void PathPlacer::set_path(const NodePtr &root)
 	if (hasPath() && root_->getID() == root->getID())
 		return;
 
+	commit_live_step();
 	setAddingPoints(false);
 	root_ = root;
 	editor_.setRoot(root_);
@@ -437,7 +511,11 @@ bool PathPlacer::clonePath()
 {
 	if (!hasPath())
 		return false;
+	commit_live_step();
 	setAddingPoints(false);
+	// A new path left without points has just been removed by that.
+	if (!hasPath())
+		return false;
 
 	// The points, the settings and the pattern; the objects are the copy's own, made by
 	// its Fill.
@@ -480,7 +558,11 @@ bool PathPlacer::removePathCurve()
 {
 	if (!hasPath())
 		return false;
+	commit_live_step();
 	setAddingPoints(false);
+	// A new path left without points has just been removed by that.
+	if (!hasPath())
+		return false;
 
 	// The objects go to a node of the name of the path, where the path was; the path
 	// itself with its curve is removed. One undo step.
@@ -517,7 +599,11 @@ bool PathPlacer::removePath()
 {
 	if (!hasPath())
 		return false;
+	commit_live_step();
 	setAddingPoints(false);
+	// A new path left without points has just been removed by that.
+	if (!hasPath())
+		return false;
 	const NodePtr root = root_;
 	::UnigineEditor::Undo::apply(new ::UnigineEditor::RemoveNodesAction(root));
 	forget_removed_path(root);
@@ -527,6 +613,7 @@ bool PathPlacer::removePath()
 
 void PathPlacer::createPath()
 {
+	commit_live_step();
 	setAddingPoints(false);
 
 	NodeDummyPtr root = NodeDummy::create();
@@ -626,14 +713,14 @@ void PathPlacer::setLiveUpdate(bool live)
 	if (live_update_ == live)
 		return;
 
+	commit_live_step();
 	live_update_ = live;
+	if (hasPath())
+		save_settings();
 	// Turning it on puts the objects back on the path at the next frame, as a step of
 	// the undo history (they may have been set by hand meanwhile).
 	if (live_update_)
-	{
 		arranged_state_.clear();
-		rearrange_undoable_ = true;
-	}
 	notify_changed();
 }
 
@@ -657,6 +744,7 @@ void PathPlacer::load_settings()
 		}
 		// The assets are of the path: not those of the path picked before.
 		pattern_.clear();
+		live_update_ = true;
 		return;
 	}
 
@@ -681,6 +769,8 @@ void PathPlacer::load_settings()
 	settings_.ground.only_intersection = json.value("ground_intersection").toBool(defaults.ground.only_intersection);
 	settings_.ground.look_through = true;
 	editor_.setSurfaceFilter(settings_.ground);
+	// The builds before kept it nowhere: it was on.
+	live_update_ = json.value("live_update").toBool(true);
 
 	pattern_.clear();
 	const QJsonArray pattern = json.value("pattern").toArray();
@@ -725,6 +815,7 @@ void PathPlacer::save_settings(bool undoable)
 	json.insert("ground_types", settings_.ground.surface_types);
 	json.insert("ground_immovable", settings_.ground.only_immovable);
 	json.insert("ground_intersection", settings_.ground.only_intersection);
+	json.insert("live_update", live_update_);
 
 	QJsonArray pattern;
 	for (const PathPatternItem &item : pattern_)
@@ -942,6 +1033,64 @@ float PathPlacer::object_length(const NodePtr &object) const
 
 void PathPlacer::rearrange(bool undoable)
 {
+	// What the live update has moved so far has its own step, before this one.
+	commit_live_step();
+	arrange(undoable, false);
+}
+
+void PathPlacer::remember_before_live(const NodePtr &object)
+{
+	const int id = object->getID();
+	if (live_before_.contains(id))
+		return;
+	LiveBefore before;
+	before.transform = object->getWorldTransform();
+	const char *scale = object->getData(SCALE_DATA);
+	before.scale = QByteArray(scale ? scale : "");
+	live_before_.insert(id, before);
+}
+
+void PathPlacer::commit_live_step()
+{
+	if (live_before_.isEmpty())
+		return;
+	const QHash<int, LiveBefore> before = live_before_;
+	live_before_.clear();
+
+	// Only what has really moved since then: an undo may have put it back meanwhile. The
+	// step takes an object from where it was, so it is put there for a moment.
+	Vector<NodePtr> moved;
+	Vector<Math::Mat4> moved_to;
+	SetNodeDataAction *scales = new SetNodeDataAction;
+	for (auto it = before.constBegin(); it != before.constEnd(); ++it)
+	{
+		const NodePtr object = World::getNodeByID(it.key());
+		if (!isNodeAlive(object))
+			continue;
+		const char *data = object->getData(SCALE_DATA);
+		const QByteArray scale(data ? data : "");
+		if (scale != it->scale)
+		{
+			object->setData(SCALE_DATA, it->scale.constData());
+			scales->set(object, SCALE_DATA, scale);
+		}
+		const Math::Mat4 transform = object->getWorldTransform();
+		if (transform != it->transform)
+		{
+			object->setWorldTransform(it->transform);
+			moved.append(object);
+			moved_to.append(transform);
+		}
+	}
+	if (!moved.empty() || !scales->isEmpty())
+		push_objects_step(scales, moved, moved_to);
+	else
+		delete scales;
+	arranged_state_ = snapshot();
+}
+
+void PathPlacer::arrange(bool undoable, bool live)
+{
 	const NodePtr objects = objects_node();
 	if (!objects)
 		return;
@@ -969,6 +1118,8 @@ void PathPlacer::rearrange(bool undoable)
 	for (int i = 0; i < placed.size(); ++i)
 	{
 		const NodePtr object = ordered[i];
+		if (live)
+			remember_before_live(object);
 
 		Slot slot = placed[i];
 		if (settings_.snap_to_ground)
@@ -1012,13 +1163,8 @@ void PathPlacer::rearrange(bool undoable)
 	}
 	if (scales && (!moved.empty() || !scales->isEmpty()))
 	{
-		using namespace ::UnigineEditor;
-		Undo::begin();
-		SetNodeDataAction::push(scales, false);
+		push_objects_step(scales, moved, moved_to);
 		scales = nullptr;
-		for (int i = 0; i < moved.size(); ++i)
-			Undo::apply(new SetNodeTransformAction(moved[i], moved_to[i]));
-		Undo::commit();
 	}
 	delete scales;
 
@@ -1092,6 +1238,7 @@ void PathPlacer::update()
 		// manipulators of the editor it had turned off come back.
 		editor_.setRoot(NodePtr());
 		arranged_state_.clear();
+		live_before_.clear();
 		length_ = 0.0;
 		unplaced_ = 0;
 		setAddingPoints(false);
@@ -1118,16 +1265,28 @@ void PathPlacer::update()
 	draw(curve);
 
 	const QByteArray state = snapshot();
-	if (state == arranged_state_)
-		return;
-
-	if (live_update_)
+	const bool mouse_held = QApplication::mouseButtons() & Qt::LeftButton;
+	if (state == arranged_state_ && !rearrange_step_replayed)
 	{
-		rearrange(rearrange_undoable_);
-		rearrange_undoable_ = false;
+		// The change is over: what it has moved becomes one step.
+		if (!live_before_.isEmpty() && !mouse_held && live_timer_.elapsed() >= LIVE_STEP_DELAY_MS)
+		{
+			commit_live_step();
+			notify_changed();
+		}
+		return;
+	}
+
+	if (!rearrange_step_replayed && live_update_ && (mouse_held || rearrange_steps_undone == 0))
+	{
+		arrange(false, true);
+		live_timer_.start();
 	} else
 	{
-		// Only the numbers shown on the page are refreshed.
+		// An undo or a redo of the objects has put them where they were, or nothing is to
+		// be moved: only the numbers shown on the page are refreshed.
+		rearrange_step_replayed = false;
+		live_before_.clear();
 		length_ = curve.length;
 		arranged_state_ = state;
 	}
@@ -1368,7 +1527,18 @@ bool PathPlacer::fill()
 		report(MSG_WARNING, uiText("The path is shorter than the first asset of the pattern.", "Кривая короче первого ассета паттерна."));
 		return false;
 	}
+	// A file that is gone still gives a node (createNode()), an empty one: it is told here.
+	for (int index : sequence)
+	{
+		if (!FileSystem::isFileExist(pattern_[index].asset.path.get()))
+		{
+			report(MSG_ERROR, uiText("Could not create an object from %1. The path is left as it was.",
+				"Не удалось создать объект из %1. Кривая оставлена как была.").arg(pattern_[index].asset.name));
+			return false;
+		}
+	}
 
+	commit_live_step();
 	Vector<NodePtr> old_objects;
 	for (int i = 0, num = objects->getNumChildren(); i < num; ++i)
 		old_objects.append(objects->getChild(i));

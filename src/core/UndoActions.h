@@ -4,6 +4,9 @@
 
 #include <UnigineGUID.h>
 #include <UnigineNode.h>
+#include <UnigineObjects.h>
+#include <UnigineProperties.h>
+#include <UnigineWorld.h>
 
 #include <QByteArray>
 #include <QString>
@@ -104,10 +107,11 @@ public:
 	~SetFilesAction() override;
 
 	// Call before the file (a path in the data of the project) is written: it is kept
-	// for undo if it is there; then after().
-	void before(const QString &file);
-	// Call after the file is written: what it has now is kept for redo.
-	void after(const QString &file);
+	// for undo if it is there; then after(). False: it could not be read. It must not be written
+	// then, the undo would have nothing to put back.
+	bool before(const QString &file);
+	// Call after the file is written: what it has now is kept for redo. False: it could not be read.
+	bool after(const QString &file);
 	bool isEmpty() const { return entries_.isEmpty(); }
 
 	// The files are written already when the step is applied.
@@ -146,6 +150,19 @@ struct PieceState
 		int shadow_mask{0};
 		bool cast_shadow{false};
 		bool cast_world_shadow{false};
+		// The rest of what a surface starts without when its mesh is written anew with
+		// another surface name; read by ofAll() only, given back by putExtras().
+		bool has_extras{false};
+		bool enabled{true};
+		bool intersection{false};
+		int intersection_mask{0};
+		bool collision{false};
+		int collision_mask{0};
+		bool physics_intersection{false};
+		int physics_intersection_mask{0};
+		// The property of the surface; invalid - none. One inherited for the surface is
+		// kept as the property it comes from.
+		Unigine::UGUID property;
 	};
 	QByteArray name;
 	QByteArray mesh;
@@ -153,10 +170,56 @@ struct PieceState
 	float radius{0.0f};
 
 	static PieceState of(const Unigine::NodePtr &node);
+	// of() with the rest of what the surfaces have (Surface::has_extras).
+	static PieceState ofAll(const Unigine::NodePtr &node)
+	{
+		PieceState state = of(node);
+		if (node->getType() != Unigine::Node::OBJECT_MESH_STATIC)
+			return state;
+		const Unigine::ObjectPtr object = Unigine::checked_ptr_cast<Unigine::Object>(node);
+		for (int s = 0; s < state.surfaces.size(); ++s)
+		{
+			Surface &surface = state.surfaces[s];
+			surface.has_extras = true;
+			surface.enabled = object->isEnabled(s);
+			surface.intersection = object->getIntersection(s);
+			surface.intersection_mask = object->getIntersectionMask(s);
+			surface.collision = object->getCollision(s);
+			surface.collision_mask = object->getCollisionMask(s);
+			surface.physics_intersection = object->getPhysicsIntersection(s);
+			surface.physics_intersection_mask = object->getPhysicsIntersectionMask(s);
+			Unigine::PropertyPtr property = object->getSurfaceProperty(s);
+			if (property && object->isSurfacePropertyInherited(s))
+				property = property->getParent();
+			surface.property = property ? property->getGUID() : Unigine::UGUID();
+		}
+		return state;
+	}
 	// The surface of that name, or nullptr.
 	const Surface *surface(const char *name) const;
 	// Gives a surface of the mesh node the settings.
 	static void putSurface(const Unigine::NodePtr &node, int surface, const Surface &settings);
+	// Gives a surface of the mesh node the rest of the settings, if they were read. A
+	// surface that has a property keeps it: it has not lost it, and it may be its own
+	// inherited one.
+	static void putExtras(const Unigine::NodePtr &node, int surface, const Surface &settings)
+	{
+		if (!settings.has_extras || node->getType() != Unigine::Node::OBJECT_MESH_STATIC)
+			return;
+		const Unigine::ObjectPtr object = Unigine::checked_ptr_cast<Unigine::Object>(node);
+		if (surface < 0 || surface >= object->getNumSurfaces())
+			return;
+		object->setEnabled(settings.enabled, surface);
+		object->setIntersection(settings.intersection, surface);
+		object->setIntersectionMask(settings.intersection_mask, surface);
+		object->setCollision(settings.collision, surface);
+		object->setCollisionMask(settings.collision_mask, surface);
+		object->setPhysicsIntersection(settings.physics_intersection, surface);
+		object->setPhysicsIntersectionMask(settings.physics_intersection_mask, surface);
+		if (settings.property.isValid() && !object->getSurfaceProperty(surface)
+			&& Unigine::Properties::findPropertyByGUID(settings.property))
+			object->setSurfaceProperty(settings.property, surface);
+	}
 	// Gives the node all of it: the mesh first, then its surfaces by their names.
 	void put(const Unigine::NodePtr &node) const;
 };
@@ -194,6 +257,70 @@ private:
 
 	QVector<Entry> entries_;
 	SetFilesAction *files_{nullptr};
+};
+
+// The rest of what the surfaces of road pieces had (PieceState::putExtras()), for a step with
+// a SetPiecesAction, which does not give it back: its files are written back first and the
+// surfaces of another name start without it. So one such action goes into the step before
+// that one, for when the step is undone, and one after it, for when it is redone. It needs no
+// count of its own (see releaseUndoActions()): the SetPiecesAction is in the same step.
+class SetPieceExtrasAction final : public ::UnigineEditor::Action
+{
+public:
+	enum When
+	{
+		ON_UNDO = 0,
+		ON_REDO,
+	};
+
+	explicit SetPieceExtrasAction(When when)
+		: when_(when)
+	{
+	}
+
+	// What the node is to have then; PieceState::ofAll().
+	void add(const Unigine::NodePtr &node, const PieceState &state)
+	{
+		if (node)
+			entries_.append(Entry{node->getID(), state});
+	}
+
+	void apply() override {}
+	void undo() override
+	{
+		if (when_ == ON_UNDO)
+			put();
+	}
+	void redo() override
+	{
+		if (when_ == ON_REDO)
+			put();
+	}
+
+private:
+	struct Entry
+	{
+		int node{0};
+		PieceState state;
+	};
+	void put() const
+	{
+		for (const Entry &entry : entries_)
+		{
+			const Unigine::NodePtr node = Unigine::World::getNodeByID(entry.node);
+			if (!node || node->getType() != Unigine::Node::OBJECT_MESH_STATIC)
+				continue;
+			const Unigine::ObjectPtr object = Unigine::checked_ptr_cast<Unigine::Object>(node);
+			for (int s = 0; s < object->getNumSurfaces(); ++s)
+			{
+				if (const PieceState::Surface *settings = entry.state.surface(object->getSurfaceName(s)))
+					PieceState::putExtras(node, s, *settings);
+			}
+		}
+	}
+
+	When when_;
+	QVector<Entry> entries_;
 };
 
 // Where new nodes stand among the children of their parent (or among the root nodes of

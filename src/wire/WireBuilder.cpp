@@ -23,6 +23,7 @@
 #include <UnigineRender.h>
 #include <UnigineWorld.h>
 
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -33,11 +34,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QRandomGenerator>
 #include <QMap>
 #include <QPair>
 #include <QRegularExpression>
 #include <QSet>
+#include <QWidget>
 
 #include <algorithm>
 #include <cmath>
@@ -78,6 +81,10 @@ const char FILE_GUIDS_DATA[] = "artist_tool_wire_file_guids";
 const char BASE_NAME_DATA[] = "artist_tool_wire_base";
 const char FOLDER_DATA[] = "artist_tool_wire_folder";
 const char STATE_DATA[] = "artist_tool_wire_state";
+// The ends of the wires the last Generate made, x y z of both ends of every wire. STATE_DATA
+// is then a hash of all the rest. A line generated before this data has a hash of everything
+// instead, the ends too.
+const char ENDS_DATA[] = "artist_tool_wire_ends";
 // What the pieces made by the last Generate are: "wire" for strips and tubes, "mesh:"
 // and the asset for a mesh. Pieces of another kind are not kept by the next Generate.
 const char KIND_DATA[] = "artist_tool_wire_kind";
@@ -152,9 +159,11 @@ const int MAX_GROUND_SAMPLES = 4096;
 const int MAX_ATTACH_DEPTH = 16;
 // How many levels over a selected node its pole is searched for.
 const int MAX_POLE_LEVELS = 2;
-// How many of the last selections are remembered while poles are picked: an undo of the
-// editor puts one of them back, and that is not a pole picked.
-const int REMEMBERED_SELECTIONS = 32;
+// How far the end of a wire may be from where the last Generate saw it, in units, and the
+// mesh still be up to date.
+const double END_TOLERANCE = 0.001;
+// How many digits after the point of these ends are kept in ENDS_DATA.
+const int END_DECIMALS = 4;
 
 bool is_line_root(const NodePtr &node)
 {
@@ -170,6 +179,56 @@ NodePtr find_line_root(const NodePtr &node)
 			return n;
 	}
 	return NodePtr();
+}
+
+// Whether a click on the widget (none - not on the editor) picks a node: a viewport, or a list
+// of nodes such as the World Hierarchy.
+bool picks_nodes(QWidget *widget)
+{
+	if (findViewportWidget(widget))
+		return true;
+	for (; widget; widget = widget->parentWidget())
+	{
+		if (qobject_cast<QAbstractItemView *>(widget))
+			return true;
+	}
+	return false;
+}
+
+// Whether an end of a wire is where the last Generate saw it. A world file keeps a coordinate
+// to some digits only, so a line saved and opened again has its points a little off, and all
+// that is worked out from them: its poles, the attach points in them. Rounding the numbers
+// would not do, two values next to each other may round apart. Never less than what numbers
+// of that size can tell.
+bool same_end(double a, double b)
+{
+	const double precision = qMax(std::abs(a), std::abs(b)) * double(std::numeric_limits<Math::Scalar>::epsilon()) * 16.0;
+	return std::abs(a - b) <= qMax(END_TOLERANCE, precision);
+}
+
+// The undo of a removal and the redo of a creation give all the nodes of a line back to the
+// editor, the spare ones too: they would be seen in the World Hierarchy and saved with the
+// world. Put out of sight again.
+void hide_spares(const NodePtr &root)
+{
+	const auto hide = [](const NodePtr &node) {
+		if (node->isShowInEditorEnabledSelf())
+			node->setShowInEditorEnabled(false);
+		if (node->isSaveToWorldEnabledSelf())
+			node->setSaveToWorldEnabled(false);
+	};
+	if (const NodePtr spare = findChildNode(root, SPARE_POLES_NODE_NAME))
+		hide(spare);
+	const NodePtr holder = findChildNode(root, POLES_NODE_NAME);
+	for (int i = 0, num = holder ? holder->getNumChildren() : 0; i < num; ++i)
+	{
+		const NodePtr pole = holder->getChild(i);
+		for (int k = 0, children = pole->getNumChildren(); k < children; ++k)
+		{
+			if (isPointFlag(pole->getChild(k), INSULATOR_SPARE_DATA))
+				hide(pole->getChild(k));
+		}
+	}
 }
 
 // The materials that come with the plugin (data/plugins/zloy_pingvin/artist_tool/materials), the
@@ -497,14 +556,22 @@ void WireBuilder::setActive(bool active)
 		// The wires are drawn with the Visualizer too, once per frame.
 		requestVisualizer();
 		Engine::get()->getEventEndWorldUpdate().connect(connections_, this, &WireBuilder::update);
-		// Hidden pieces are saved shown; they are hidden again on the next frame.
-		World::getEventPreWorldSave().connect(connections_, [this](const char *) { show_hidden_pieces(); });
+		// Hidden pieces are saved shown; they are hidden again on the next frame. Spare nodes
+		// are not saved, of whichever line of the world.
+		World::getEventPreWorldSave().connect(connections_, [this](const char *) {
+			show_hidden_pieces();
+			for (const WireLineInfo &line : findLines())
+				hide_spares(World::getNodeByID(line.id));
+		});
+		// Another world: its lines go to the list, also while no line is the current one.
+		World::getEventPostWorldLoad().connect(connections_, [this](const char *) { lines_changed(); });
 		// The mesh laid along the wires is read again when an asset it is made of is saved,
 		// reimported, moved or removed.
 		AssetManager::getEventAssetChanged().connect(connections_, [this](const char *path) { asset_changed(path); });
 		AssetManager::getEventAssetRemoved().connect(connections_, [this](const char *path) { asset_changed(path); });
 		AssetManager::getEventAssetMoved().connect(connections_, [this](const char *from, const char *) { asset_changed(from); });
-		// Esc ends adding poles; Ctrl+Z is told from a pole selected.
+		// Esc ends adding poles; a pole picked is told from a selection an undo puts back by
+		// the click.
 		qApp->installEventFilter(this);
 		// The poles and the mesh may have changed while the tool was off.
 		mesh_source_path_.clear();
@@ -538,10 +605,9 @@ void WireBuilder::selectionChanged()
 			selected.insert(node->getID());
 	}
 
-	// A selection that was there before is the one an undo (or a redo) of the editor has
-	// put back, not a pole picked: an undo from the menu, or a slow one, is told too.
-	const bool undoing = recent_selections_.contains(selected);
-	if (adding_poles_ && hasLine() && !undoing)
+	// A pole is picked with a click (see eventFilter()): a selection that comes without one is
+	// what an undo or a redo of the editor has put back, from the keys or from the menu.
+	if (adding_poles_ && hasLine() && pole_click_)
 	{
 		QVector<int> ids = pole_ids();
 		bool added = false;
@@ -573,17 +639,7 @@ void WireBuilder::selectionChanged()
 		}
 	}
 	selected_before_ = selected;
-	remember_selection(selected);
 	notify_changed();
-}
-
-void WireBuilder::remember_selection(const QSet<int> &selected)
-{
-	if (!recent_selections_.isEmpty() && recent_selections_.last() == selected)
-		return;
-	recent_selections_.append(selected);
-	while (recent_selections_.size() > REMEMBERED_SELECTIONS)
-		recent_selections_.removeFirst();
 }
 
 QVector<WireLineInfo> WireBuilder::findLines() const
@@ -618,6 +674,9 @@ bool WireBuilder::selectLine(int root_id)
 
 	setAddingPoles(false);
 	setAddingPoints(false);
+	// Adding is over: this line is removed now if it is a new one left empty.
+	if (!isNodeAlive(root))
+		return false;
 	set_line(root);
 	Vector<NodePtr> nodes;
 	nodes.append(root);
@@ -693,6 +752,7 @@ void WireBuilder::set_line(const NodePtr &root)
 	setAddingPoints(false);
 	show_hidden_pieces();
 	root_ = root;
+	line_open_ = true;
 	load_settings();
 	refresh_other_lines();
 	// A line that connects poles of the world has no curve.
@@ -708,6 +768,7 @@ void WireBuilder::set_line(const NodePtr &root)
 void WireBuilder::forget_line()
 {
 	root_ = NodePtr();
+	line_open_ = false;
 	poles_cached_ = false;
 	editor_.setRoot(NodePtr());
 	poles_state_.clear();
@@ -718,6 +779,8 @@ void WireBuilder::forget_line()
 	cuts_.clear();
 	triangles_ = 0;
 	state_.clear();
+	shape_hash_.clear();
+	end_values_.clear();
 	remove_preview();
 }
 
@@ -757,6 +820,7 @@ void WireBuilder::create_root(const WireSettings &start_settings, bool curve)
 	root->setSaveToWorldEnabledRecursive(true);
 	// The settings are a part of making it, not a step of their own.
 	root_ = root;
+	line_open_ = true;
 	settings_ = limited(start_settings);
 	// Every new line its own random sags and turns.
 	settings_.seed = randomSeed();
@@ -838,6 +902,9 @@ bool WireBuilder::cloneLine()
 		return false;
 	setAddingPoles(false);
 	setAddingPoints(false);
+	// Adding is over: a new line left empty is removed now, there is nothing to copy.
+	if (!hasLine())
+		return false;
 	show_hidden_pieces();
 
 	// The points (or the poles of the world) and the settings; the poles of a curve are
@@ -893,6 +960,9 @@ bool WireBuilder::removeLineCurve()
 		return false;
 	setAddingPoles(false);
 	setAddingPoints(false);
+	// Adding is over: a new line left empty is removed already.
+	if (!hasLine())
+		return false;
 	show_hidden_pieces();
 
 	// The poles and the pieces go to a node of the name of the line, where the line was;
@@ -937,6 +1007,9 @@ bool WireBuilder::removeLine(bool files)
 		return false;
 	setAddingPoles(false);
 	setAddingPoints(false);
+	// Adding is over: a new line left empty is removed already, it has no files.
+	if (!hasLine())
+		return false;
 	show_hidden_pieces();
 
 	const NodePtr root = root_;
@@ -1003,8 +1076,7 @@ void WireBuilder::setAddingPoles(bool adding)
 				selected_before_.insert(node->getID());
 		}
 	}
-	recent_selections_.clear();
-	remember_selection(selected_before_);
+	pole_click_ = false;
 
 	if (!adding)
 		discard_empty_line(true);
@@ -2235,7 +2307,7 @@ void WireBuilder::save_settings(bool undoable, bool merge)
 ////////////////////////////////////////////////////////////////////////////////
 // The wires.
 ////////////////////////////////////////////////////////////////////////////////
-QByteArray WireBuilder::snapshot(const QVector<WireEnds> &ends) const
+QByteArray WireBuilder::snapshot(const QVector<WireEnds> &ends, bool with_places) const
 {
 	// The material and the folder are not the shape of the wires: the pieces get the
 	// material at once, the folder is for the next Generate. The settings are written out
@@ -2266,8 +2338,11 @@ QByteArray WireBuilder::snapshot(const QVector<WireEnds> &ends) const
 		putBytes(state, double(end.pole_a));
 		putBytes(state, double(end.pole_b));
 		putBytes(state, double(end.number));
-		putBytes(state, end.from);
-		putBytes(state, end.to);
+		if (with_places)
+		{
+			putBytes(state, end.from);
+			putBytes(state, end.to);
+		}
 		putBytes(state, end.sag_scale);
 		putBytes(state, end.sag_random);
 		putBytes(state, end.thickness_scale);
@@ -2289,6 +2364,18 @@ void WireBuilder::rebuild(const QVector<WireEnds> &ends)
 	if (mesh)
 		load_mesh_source();
 	state_ = snapshot(ends);
+	shape_hash_ = QCryptographicHash::hash(snapshot(ends, false), QCryptographicHash::Md5).toHex();
+	end_values_.clear();
+	end_values_.reserve(ends.size() * 6);
+	for (const WireEnds &end : ends)
+	{
+		for (const Math::Vec3 &place : {end.from, end.to})
+		{
+			end_values_.append(double(place.x));
+			end_values_.append(double(place.y));
+			end_values_.append(double(place.z));
+		}
+	}
 	preview_dirty_ = true;
 
 	double copy_length = 0.0;
@@ -2738,7 +2825,30 @@ bool WireBuilder::isOutdated() const
 
 bool WireBuilder::is_up_to_date() const
 {
-	return dataString(root_, STATE_DATA).toUtf8() == QCryptographicHash::hash(state_, QCryptographicHash::Md5).toHex();
+	const QByteArray stored = dataString(root_, STATE_DATA).toUtf8();
+	const char *ends = root_->getData(ENDS_DATA);
+	// Generated by a build before ENDS_DATA, or that step is undone: a hash of everything.
+	if (!ends || !*ends)
+		return stored == QCryptographicHash::hash(state_, QCryptographicHash::Md5).toHex();
+	if (stored != shape_hash_)
+		return false;
+
+	// Read once: it is asked for several times a frame.
+	if (qstrcmp(stored_ends_text_.constData(), ends) != 0)
+	{
+		stored_ends_text_ = QByteArray(ends);
+		stored_ends_.clear();
+		for (const QByteArray &value : stored_ends_text_.split(' '))
+			stored_ends_.append(value.toDouble());
+	}
+	if (stored_ends_.size() != end_values_.size())
+		return false;
+	for (int i = 0; i < end_values_.size(); ++i)
+	{
+		if (!same_end(stored_ends_[i], end_values_[i]))
+			return false;
+	}
+	return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3135,7 +3245,15 @@ bool WireBuilder::generate()
 	// the new ones in, the extra ones out, and what the line remembers of its Generate.
 	SetNodeDataAction *data_action = new SetNodeDataAction;
 	setGeneratedData(data_action, root_, line_generated_data(), generatedFileList(files, old_files), base, folder);
-	data_action->set(root_, STATE_DATA, QCryptographicHash::hash(state_, QCryptographicHash::Md5).toHex());
+	data_action->set(root_, STATE_DATA, shape_hash_);
+	QByteArray ends;
+	for (double value : end_values_)
+	{
+		if (!ends.isEmpty())
+			ends.append(' ');
+		ends.append(QByteArray::number(value, 'f', END_DECIMALS));
+	}
+	data_action->set(root_, ENDS_DATA, ends);
 	data_action->set(root_, KIND_DATA, kind.toUtf8());
 	commitGenerate(file_action, kept, kept_states, kept_transforms, created, removed, data_action);
 
@@ -3152,6 +3270,23 @@ bool WireBuilder::generate()
 ////////////////////////////////////////////////////////////////////////////////
 bool WireBuilder::eventFilter(QObject *watched, QEvent *event)
 {
+	// The selection that comes after a left click in a viewport or in a list of nodes is a
+	// pole picked. A key (Ctrl+Z) or a click elsewhere (Undo in the menu) ends that; a Ctrl held
+	// for Ctrl + click does not, it repeats while it is down. The widget is the one under the
+	// click, not 'watched': a press a viewport does not take goes on to its parents too.
+	if (active_ && adding_poles_)
+	{
+		if (event->type() == QEvent::KeyPress)
+		{
+			const int key = static_cast<QKeyEvent *>(event)->key();
+			if (key != Qt::Key_Control && key != Qt::Key_Shift && key != Qt::Key_Alt && key != Qt::Key_Meta)
+				pole_click_ = false;
+		} else if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick)
+		{
+			const QMouseEvent *mouse = static_cast<QMouseEvent *>(event);
+			pole_click_ = mouse->button() == Qt::LeftButton && picks_nodes(QApplication::widgetAt(mouse->globalPosition().toPoint()));
+		}
+	}
 	if (active_ && event->type() == QEvent::KeyPress)
 	{
 		const QKeyEvent *key = static_cast<QKeyEvent *>(event);
@@ -3176,8 +3311,9 @@ void WireBuilder::update()
 	++frame_;
 	poles_cached_ = false;
 
-	// The line was deleted or its world closed.
-	if (root_ && !hasLine())
+	// The line was deleted or its world closed. A node destroyed with its world reads as no
+	// node at all, so it is not root_ that tells there was a line.
+	if (line_open_ && !hasLine())
 	{
 		forget_line();
 		adding_poles_ = false;
@@ -3218,6 +3354,7 @@ void WireBuilder::update()
 			sync_poles();
 			notify_changed();
 		}
+		hide_spares(root_);
 	}
 
 	const QVector<WireEnds> ends = wire_ends();

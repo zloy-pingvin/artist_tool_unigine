@@ -1,6 +1,6 @@
 # Artist Tools for UNIGINE
 
-Tools for everyday level work in the **UNIGINE 2.22 Editor**: place props, build fences and roads, hang wires between poles, check dimensions, unpack clutter, and bake textures for simpler meshes. Everything lives in one dockable window: **Windows → Artist Tools**.
+Tools for everyday level work in the **UNIGINE 2.22 Editor**: place props, drop and pour them with physics, build fences and roads, hang wires between poles, check dimensions, unpack clutter, and bake textures for simpler meshes. Everything lives in one dockable window: **Windows → Artist Tools**.
 
 [UNIGINE Store](https://store.unigine.com/en/publisher/1ee19a48-e62a-6d86-8136-9d637c69bc0c) · [Video overview — Part 1](https://www.youtube.com/watch?v=lC9pwmAlltY) · [Part 2](https://www.youtube.com/watch?v=L-KC0PTh6I8) · [Build from source](docs/BUILDING.md)
 
@@ -17,6 +17,7 @@ Tools for everyday level work in the **UNIGINE 2.22 Editor**: place props, build
 | **Measure** | Check distances, slopes, and angles, or place a person-shaped height reference. |
 | **Unpack Clutter** | Convert World Clutter, Mesh Clutter, and Mesh Cluster into regular nodes you can edit individually. |
 | **Baker** | Bake albedo, shading, normals, and optional emission from detailed models onto a low-poly UV layout. |
+| **Physics Drop** | Drop selected objects, pour new ones with a brush, or drag them into piles, under physics that exists only while you place them. |
 
 The interface supports English and Russian and follows the editor's language settings. Hover over a control for help; shortcuts are listed at the bottom of each tab.
 
@@ -90,11 +91,29 @@ Select clutter or cluster nodes in the World Hierarchy, choose whether to disabl
 
 ### Bake textures for a low-poly model
 
-Open **Baker** and add the high-poly and low-poly nodes in the **Models** tab. Prepare a unique low-poly UV0 layout, choose the output maps and resolution, set the frontal/rear cage distances, then click **Bake**. Textures are saved beside the low-poly mesh asset, and its material is created or updated.
+Open **Baker** and add the high-poly and low-poly nodes in the **Models** tab. Prepare a unique low-poly UV0 layout, choose the output maps and resolution, set the frontal/rear cage distances, then click **Bake**. Textures are saved beside the low-poly mesh asset, and a `<name>_baked.mat` material is created or updated for it; other materials are not changed on disk.
 
 Use **As rendered** for layered materials and material graphs. **Groups** separates matching parts; **Fit cage** adjusts projection distances per part. Disable maps you want to keep when re-baking.
 
 Enable **Show Cage** to inspect the projection shell directly in the viewport. **Fit Cage** tightens per-part distances within the global limits. Hold **− Shrink Front** or **+ Grow Front** to smoothly adjust the frontal distance: the buttons affect parts selected in the list, or all parts when none are selected. **Reset To Global** clears individual distance overrides.
+
+### Drop and pour objects with physics
+
+In **Physics Drop**, objects fall, roll, and pile up under physics that runs only while you place them. They need no bodies or shapes of their own and get none, so nothing physical is left in the scene.
+
+![Cans, boxes, traffic cones, and barrels piled up by the Physics Drop brush, with more objects falling from its green ring](docs/images/physics-drop.png)
+
+**Drop Selected:** select objects in the world and click the button. They stay where they settle, or where they are when **Time limit** runs out. **Esc** puts them back while they fall; afterwards **Ctrl+Z** does.
+
+**Brush:** add assets with **Add Selected Assets** and click **Start Pouring**. A click in the viewport puts down **Per click** objects, holding the button keeps pouring at **Per second**, and **Ctrl + click** erases what was poured. The wheel changes the radius, **Ctrl + wheel** the height, and **Ctrl+Z** takes back the last stroke.
+
+**Drag:** click **Start Dragging**, then take an object with the mouse, or with the editor's gizmo if you choose **Gizmo**. What it hits moves too. **Shift + click** pushes everything in the zone around the mouse away, **Ctrl + click** pulls it in, and **Ctrl + Shift + click** carries a whole pile. Only objects inside the zone and no bigger than **Max size** take part.
+
+Brush and Drag are one session: pour, drag, and pour again until you click **Apply** (**Enter**). All of it is one **Ctrl+Z** step. **Space** pauses and **Esc** cancels. Switching to another tab or closing the window applies what is there.
+
+Under **On Apply**, **Result** turns new objects into **Nodes** or into a lighter **Cluster** per mesh. **Remove Hidden** takes away objects hidden inside a pile, so it looks the same with fewer objects. It is set to **Medium** for the brush and off for dragging. Such a pile is hollow, so avoid moving it afterwards.
+
+**Shape** sets the form objects fall in: **Auto** uses the shapes an object already has, or else a simple shape that fits the mesh, or its hull. **Pieces** suits hollow things like buckets. **Fall on** chooses what counts as solid. The physics runs only inside a dome in front of the camera, and what is outside it stands still. Objects that fall out of the world are removed when you apply; **Ctrl+Z** brings back those that were in the scene before.
 
 ## A few useful details
 

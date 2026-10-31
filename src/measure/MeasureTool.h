@@ -142,8 +142,8 @@ public:
 	static double angleAt(const Unigine::Math::Vec3 &a, const Unigine::Math::Vec3 &corner,
 		const Unigine::Math::Vec3 &b);
 
-	// Whether the window of the plugin is open: the measurements are not shown while
-	// it is closed. Not set - always.
+	// Whether the window of the plugin is open, if only behind another tab of the editor:
+	// the measurements are not shown while it is closed. Not set - always.
 	std::function<bool()> is_window_shown;
 	// Called when the measurements, the point under the mouse or the modes change.
 	std::function<void()> on_changed;

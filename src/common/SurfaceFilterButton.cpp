@@ -80,6 +80,8 @@ SurfaceFilterButton::SurfaceFilterButton(const Texts &texts, QWidget *parent)
 	menu->addSeparator();
 	for (const SurfaceTypeName &type : SURFACE_TYPES)
 	{
+		if (type.type & texts.hidden_types)
+			continue;
 		Item item;
 		item.check = add_menu_check_box(menu, QString::fromUtf8(type.name));
 		item.surface_type = type.type;
@@ -88,8 +90,9 @@ SurfaceFilterButton::SurfaceFilterButton(const Texts &texts, QWidget *parent)
 	button_->setMenu(menu);
 	layout->addWidget(button_, 1);
 
-	layout->addWidget(makeResetButton(texts.reset_tooltip, this, [this]() {
-		setFilter(SurfaceFilter());
+	const SurfaceFilter default_filter = texts.default_filter;
+	layout->addWidget(makeResetButton(texts.reset_tooltip, this, [this, default_filter]() {
+		setFilter(default_filter);
 		if (on_changed)
 			on_changed();
 	}));
@@ -106,7 +109,7 @@ SurfaceFilterButton::SurfaceFilterButton(const Texts &texts, QWidget *parent)
 	for (const Item &item : types_)
 		connect(item.check, &QCheckBox::toggled, this, changed);
 
-	setFilter(SurfaceFilter());
+	setFilter(default_filter);
 }
 
 SurfaceFilter SurfaceFilterButton::getFilter() const

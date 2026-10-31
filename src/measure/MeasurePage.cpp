@@ -2,6 +2,8 @@
 #include "SurfaceFilterButton.h"
 #include "UiHelpers.h"
 
+#include <editor/UnigineWindowManager.h>
+
 #include <QTimer>
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -86,13 +88,14 @@ MeasurePage::MeasurePage(QWidget *parent)
 	: QWidget(parent)
 {
 	tool_ = new MeasureTool(this);
-	// The measurements left on the screen while another tab is open are hidden with
-	// the window of the plugin (the page is inside its tabs).
+	// The measurements left on the screen while another tab is open are hidden when the
+	// window of the plugin (the page is inside its tabs) is closed. Not when another tab
+	// of its dock area covers it: the editor counts such a window as open.
 	tool_->is_window_shown = [this]() {
-		for (const QWidget *widget = this; widget; widget = widget->parentWidget())
+		for (QWidget *widget = this; widget; widget = widget->parentWidget())
 		{
 			if (widget->objectName() == QLatin1String("ArtistToolWindow"))
-				return widget->isVisible();
+				return ::UnigineEditor::WindowManager::isVisible(widget);
 		}
 		return false;
 	};
@@ -377,12 +380,14 @@ QWidget *MeasurePage::build_tool_group()
 	only_on_tab_ = new QCheckBox(uiText("Show Only On This Tab", "Показывать только на этой вкладке"));
 	only_on_tab_->setToolTip(loc_.tip(
 		"On: the measurements are seen only while this tab is open.\n"
-		"Off: they stay in the viewport while other tabs of the plugin are open too - "
-		"only to be seen there: they can not be clicked or moved until this tab is open "
-		"again. When the window of the plugin is closed, they are not shown.",
+		"Off: they stay in the viewport while other tabs of the plugin are open too, and "
+		"while another tab of the editor covers the plugin - only to be seen there: they "
+		"can not be clicked or moved until this tab is open again. When the window of the "
+		"plugin is closed, they are not shown.",
 		"Вкл: замеры видны, только пока открыта эта вкладка.\n"
-		"Выкл: они остаются во вьюпорте и на других вкладках плагина - только для "
-		"просмотра: кликнуть или сдвинуть их нельзя, пока снова не открыта эта вкладка. "
+		"Выкл: они остаются во вьюпорте и на других вкладках плагина, и когда плагин "
+		"заслонён другой вкладкой редактора - только для просмотра: кликнуть или сдвинуть "
+		"их нельзя, пока снова не открыта эта вкладка. "
 		"Когда окно плагина закрыто, они не показываются."));
 	layout->addWidget(only_on_tab_, 5, 0, 1, 2);
 

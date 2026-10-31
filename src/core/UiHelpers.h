@@ -12,6 +12,7 @@ class QButtonGroup;
 class QSettings;
 class QDial;
 class QHBoxLayout;
+class QKeyEvent;
 class QObject;
 class QToolButton;
 class QWidget;
@@ -101,6 +102,13 @@ QDial *makeAngleDial(int minimum, int maximum, int major_step = 45, int snap = 4
 // dialog, a menu or a popup is open, nor in a field being typed into (a rename in the
 // World Hierarchy too) - Esc is theirs then.
 bool isEscapeFree(QObject *watched);
+// Whether a key pressed now (sent to 'watched') belongs to a field being typed into, a dialog
+// or a menu. A read-only text, like a log, does not count.
+bool isTypingInField(QObject *watched);
+// The key of an event, a letter by its place on the keyboard: Qt::Key_A to Qt::Key_Z whatever the layout
+// (on a Russian one key() is a Cyrillic letter, and Ctrl+Z would not be Ctrl+Z). On Windows only; other
+// keys and other systems as key() has them.
+int latinKey(const QKeyEvent *key);
 
 // A header that folds and unfolds the widget under it, like the sections of the
 // editor's own tool windows.

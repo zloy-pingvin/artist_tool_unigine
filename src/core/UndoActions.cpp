@@ -271,10 +271,14 @@ QString disk_path(const QString &file)
 	return data + file;
 }
 
-QByteArray read_file(const QString &file)
+// False: not read. An empty file is not the same: what is kept here is written back over the file.
+bool read_file(const QString &file, QByteArray &bytes)
 {
 	QFile in(disk_path(file));
-	return in.open(QIODevice::ReadOnly) ? in.readAll() : QByteArray();
+	if (!in.open(QIODevice::ReadOnly))
+		return false;
+	bytes = in.readAll();
+	return in.error() == QFileDevice::NoError && bytes.size() == in.size();
 }
 
 } // namespace
@@ -289,26 +293,29 @@ SetFilesAction::~SetFilesAction()
 	--live_actions;
 }
 
-void SetFilesAction::before(const QString &file)
+bool SetFilesAction::before(const QString &file)
 {
 	// Only a file that is there: a new one stays when the step is undone (the nodes
 	// that use it go away with the undo of their own steps).
 	if (!QFile::exists(disk_path(file)))
-		return;
+		return true;
 	Entry entry;
 	entry.file = file;
 	entry.guid = ::UnigineEditor::AssetManager::getAssetGUIDFromPath(file.toUtf8().constData());
-	entry.before = read_file(file);
+	if (!read_file(file, entry.before))
+		return false;
 	entries_.append(entry);
+	return true;
 }
 
-void SetFilesAction::after(const QString &file)
+bool SetFilesAction::after(const QString &file)
 {
 	for (Entry &entry : entries_)
 	{
-		if (entry.file == file)
-			entry.after = read_file(file);
+		if (entry.file == file && !read_file(file, entry.after))
+			return false;
 	}
+	return true;
 }
 
 void SetFilesAction::put(bool after) const

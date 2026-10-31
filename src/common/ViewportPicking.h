@@ -4,6 +4,7 @@
 
 #include <UnigineMathLib.h>
 #include <UnigineNode.h>
+#include <UnigineObjects.h>
 #include <UnigineVector.h>
 
 #include <QPointF>
@@ -42,6 +43,16 @@ struct SurfaceFilter
 	bool look_through{false};
 };
 
+// The kind of an object in the filter (SurfaceFilter::Type); 0 if the filter does not know it.
+int surfaceFilterType(const Unigine::ObjectPtr &object);
+
+// Whether a camera draws the surface: it is enabled, the viewport mask of the camera sees it
+// (a mesh that only casts the shadow is not seen), and 'distance' (see surfaceDrawDistance())
+// is within its visibility and fade distances.
+bool isSurfaceDrawn(const Unigine::ObjectPtr &object, int surface, float distance, int viewport_mask);
+// The distance to the object that counts for its surfaces being drawn from 'camera'.
+float surfaceDrawDistance(const Unigine::ObjectPtr &object, const Unigine::Math::Vec3 &camera);
+
 // Point of the surface a ray has hit.
 struct SurfaceHit
 {
@@ -51,6 +62,8 @@ struct SurfaceHit
 	double distance{0.0};
 	Unigine::Math::Vec3 point;
 	Unigine::Math::vec3 normal{0.0f, 0.0f, 1.0f};
+	// What was hit.
+	Unigine::ObjectPtr object;
 };
 
 // Editor viewports are widgets of the "ViewportWindowScene" class. Other render
@@ -60,6 +73,9 @@ bool isViewportWidget(const QWidget *widget);
 QWidget *findViewportWidget(QObject *watched);
 // The editor viewport shown in the widget.
 ::UnigineEditor::ViewportWindowPtr matchViewport(const QWidget *widget);
+// A point of the viewport widget in the pixels of the picture rendered inside it, a little
+// smaller than the widget: the coordinates getWidth() and getHeight() of its viewport go with.
+QPointF viewportScenePosition(const QWidget *viewport, const QPointF &position);
 // World ray under a point of the viewport widget. False if there is no camera.
 bool screenRay(const QWidget *viewport, const QPointF &position, Unigine::Math::Vec3 &p0, Unigine::Math::Vec3 &p1);
 
@@ -67,10 +83,14 @@ bool screenRay(const QWidget *viewport, const QPointF &position, Unigine::Math::
 // of the editor viewport when it is at 'point'. Lets a helper keep the same size on
 // the screen: it shrinks as the camera comes closer and grows as it moves away.
 float viewportSizeAt(const Unigine::Math::Vec3 &point, float fraction);
+// The size, in world units, of one pixel of the editor viewport at 'point'.
+float viewportPixelSizeAt(const Unigine::Math::Vec3 &point);
 // The distance from the camera of the editor viewport to 'point', in units.
 float viewportDistanceTo(const Unigine::Math::Vec3 &point);
 // The position of the camera of the editor viewport.
 Unigine::Math::Vec3 viewportCameraPosition();
+// Where the camera of the editor viewport is and where it looks. False if there is no camera.
+bool viewportCameraView(Unigine::Math::Vec3 &position, Unigine::Math::vec3 &direction);
 
 // Editor helpers (gizmos, asset previews) live under nodes named "UnigineEditor.*".
 bool isEditorInternal(const Unigine::NodePtr &node);
@@ -88,6 +108,9 @@ bool isInside(const Unigine::NodePtr &node, const Unigine::NodePtr &root);
 // rather than lets it through, so the hit is "not allowed" while the ray ends on
 // such an object, unless the filter looks through it (SurfaceFilter::look_through).
 // The nodes of 'ignore', with everything inside them, are skipped.
+// A ray aimed from the camera of a viewport (screenRay()) does not see the surfaces that
+// camera does not draw. Any other ray (down to the ground...) sees all the enabled ones,
+// so that what it finds does not depend on where the camera is.
 SurfaceHit raycastSurface(const Unigine::Math::Vec3 &p0, const Unigine::Math::Vec3 &p1,
 	const SurfaceFilter &filter, const Unigine::Vector<Unigine::NodePtr> &ignore);
 

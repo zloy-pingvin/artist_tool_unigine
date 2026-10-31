@@ -29,6 +29,10 @@ public:
 		QString only_intersection;
 		QString only_intersection_tooltip;
 		QString reset_tooltip;
+		// What the field starts with and the reset button puts back.
+		SurfaceFilter default_filter;
+		// Kinds of objects (SurfaceFilter::Type) that mean nothing to the tool: not listed.
+		int hidden_types{0};
 	};
 
 	explicit SurfaceFilterButton(const Texts &texts, QWidget *parent = nullptr);

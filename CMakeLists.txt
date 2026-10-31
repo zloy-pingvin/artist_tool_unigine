@@ -85,7 +85,7 @@ endif()
 # The sources are in src/, a folder per tool (road, path_placer, measure, ...), the
 # code they share in common/ and core/.
 set(src ${CMAKE_CURRENT_SOURCE_DIR}/src)
-set(source_dirs core common object_placer path_placer road wire measure clutter baker)
+set(source_dirs core common object_placer path_placer road wire measure clutter baker physics_drop)
 
 add_library(${target} SHARED
 	${src}/core/${target}.cpp
@@ -110,6 +110,8 @@ add_library(${target} SHARED
 	${src}/baker/BakeGpu.h
 	${src}/baker/BakerWindow.cpp
 	${src}/baker/BakerWindow.h
+	${src}/common/AssetBrowserJump.cpp
+	${src}/common/AssetBrowserJump.h
 	${src}/common/AssetLocator.cpp
 	${src}/common/AssetLocator.h
 	${src}/common/CurveEditor.cpp
@@ -152,6 +154,18 @@ add_library(${target} SHARED
 	${src}/clutter/ClutterUnpacker.h
 	${src}/clutter/ClutterUnpackPage.cpp
 	${src}/clutter/ClutterUnpackPage.h
+	${src}/physics_drop/PhysicsBrush.cpp
+	${src}/physics_drop/PhysicsBrush.h
+	${src}/physics_drop/PhysicsDrop.cpp
+	${src}/physics_drop/PhysicsDrop.h
+	${src}/physics_drop/PhysicsDropPage.cpp
+	${src}/physics_drop/PhysicsDropPage.h
+	${src}/physics_drop/PhysicsGlow.cpp
+	${src}/physics_drop/PhysicsGlow.h
+	${src}/physics_drop/PhysicsShapeFit.cpp
+	${src}/physics_drop/PhysicsShapeFit.h
+	${src}/physics_drop/PhysicsVisibility.cpp
+	${src}/physics_drop/PhysicsVisibility.h
 	)
 
 if (ARTIST_TOOL_DEV_PAGES)

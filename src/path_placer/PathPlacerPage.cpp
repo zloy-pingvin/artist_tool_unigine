@@ -784,11 +784,13 @@ QWidget *PathPlacerPage::build_objects_group()
 		"On: the objects are always kept on the path. They follow the points, and an "
 		"object moved by hand goes back to its place at once.\n"
 		"Off: nothing moves by itself - use it to adjust objects by hand; Rearrange Now "
-		"puts them back on the path.",
+		"puts them back on the path.\n"
+		"It is kept with the path.",
 		"Вкл: объекты всегда стоят на кривой. Они следуют за точками, а объект, "
 		"сдвинутый руками, сразу возвращается на место.\n"
 		"Выкл: само ничего не двигается - так можно подправлять объекты руками; кнопка "
-		"[[Rearrange Now|«Расставить заново»]] вернёт их на кривую."));
+		"[[Rearrange Now|«Расставить заново»]] вернёт их на кривую.\n"
+		"Хранится в самой кривой."));
 	update_row->addWidget(live_update_, 1);
 	rearrange_button_ = new QPushButton(uiText("Rearrange Now", "Расставить заново"));
 	rearrange_button_->setIcon(editor_icon(":/images/action_material_inherit.png"));
@@ -804,7 +806,10 @@ QWidget *PathPlacerPage::build_objects_group()
 	connect(up_axis_, &QButtonGroup::idClicked, this, [this](int) { apply_up_axis(); });
 	for (QCheckBox *check : {yaw_only_, skew_})
 		connect(check, &QCheckBox::toggled, this, [this](bool) { apply_settings(); });
-	connect(live_update_, &QCheckBox::toggled, this, [this](bool checked) { placer_->setLiveUpdate(checked); });
+	connect(live_update_, &QCheckBox::toggled, this, [this](bool checked) {
+		if (!updating_)
+			placer_->setLiveUpdate(checked);
+	});
 	connect(rearrange_button_, &QPushButton::clicked, this, [this]() {
 		placer_->rearrange(true);
 		refresh();

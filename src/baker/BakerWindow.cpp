@@ -10,8 +10,10 @@
 #include <editor/UnigineSelection.h>
 #include <editor/UnigineSelector.h>
 #include <editor/UnigineShortcutManager.h>
+#include <editor/UnigineUndo.h>
 #include <editor/UnigineWindowManager.h>
 
+#include <UnigineConsole.h>
 #include <UnigineEngine.h>
 #include <UnigineLog.h>
 #include <UnigineMaterials.h>
@@ -72,6 +74,9 @@
 #include <vector>
 
 using namespace Unigine;
+
+// How long the engine has for a chunk of captures, counted with the editor in focus.
+static constexpr std::chrono::seconds CAPTURE_ALLOWANCE(25);
 
 // Physical memory the machine can still hand out, in bytes; 0 = unknown.
 // Unigine::Memory only reports the engine's OWN allocations, so this needs a
@@ -815,7 +820,7 @@ BakerWindow::BakerWindow(QWidget *parent)
 		mapsLayout->addStretch();
 		settingsLayout->addRow(tr2("Карты", "Maps"), maps);
 	}
-	// the emission pass adds a fourth render target per surface, so the capture
+	// the emission pass adds a fourth, HDR render target per surface, so the capture
 	// budget (and the size it resolves to) changes with this checkbox
 	connect(emissionCheck_, &QCheckBox::toggled, this, [this](bool) { updateCaptureInfo(); });
 
@@ -908,16 +913,16 @@ BakerWindow::BakerWindow(QWidget *parent)
 	captureSizeCombo_->setToolTip(tip2(
 		"Размер GPU-захвата на поверхность high-poly. Ограничивает детализацию режима\n"
 		"\"как в рендере\" независимо от разрешения запечки.\n"
-		"Авто: min(разрешение, 2048), но не больше sqrt(лимит / (поверхности * 13 Б, 17 Б с emission)),\n"
+		"Авто: min(разрешение, 2048), но не больше sqrt(лимит / (поверхности * 13 Б, 21 Б с emission)),\n"
 		"где лимит = 50% свободной ОЗУ, максимум 16 ГБ.\n"
-		"Ручной размер лимит не проверяет: при нехватке ОЗУ захваты приходят чёрными,\n"
-		"и такие поверхности печекаются из текстур материала. Расход показан внизу окна.\n",
+		"Ручной размер лимит не проверяет: при нехватке памяти захват не удастся,\n"
+		"и запекание остановится с ошибкой. Расход показан внизу окна.\n",
 		"GPU capture size per high-poly surface. Caps the detail of the \"as rendered\"\n"
 		"mode regardless of the bake resolution.\n"
-		"Auto: min(resolution, 2048), limited by sqrt(budget / (surfaces * 13 B, 17 B with emission)),\n"
+		"Auto: min(resolution, 2048), limited by sqrt(budget / (surfaces * 13 B, 21 B with emission)),\n"
 		"where budget = 50% of free RAM, 16 GB max.\n"
-		"A manual size ignores the budget: if RAM runs short, captures come back black\n"
-		"and those surfaces bake from the material textures. Usage is shown at the bottom."));
+		"A manual size ignores the budget: if memory runs short, the capture fails\n"
+		"and the bake stops with an error. Usage is shown at the bottom."));
 	debugLayout->addRow(tr2("Размер захвата", "Capture Size"),
 		makeChoiceRow(captureSizeCombo_, {":/images/tools/icon_gear.png", ":/images/tools/icon_scale.png"}));
 	connect(captureSizeCombo_, &QComboBox::currentIndexChanged, this,
@@ -1043,6 +1048,10 @@ BakerWindow::BakerWindow(QWidget *parent)
 			cancelRequested_ = true;
 		}
 	});
+	// Hide is for the viewport only: what it turned off goes into the file of the world as
+	// it was, or it would stay off there with nothing left to bring it back.
+	World::getEventPreWorldSave().connect(worldConns_, [this](const char *) { put_hidden_nodes(true); });
+	World::getEventPostWorldSave().connect(worldConns_, [this](const char *) { put_hidden_nodes(false); });
 }
 
 BakerWindow::~BakerWindow()
@@ -1052,6 +1061,9 @@ BakerWindow::~BakerWindow()
 	// before this page. Saved here only if stop() was not called and the panel is there.
 	if (!shuttingDown_ && debugPanel_)
 		saveSettings();
+	if (!shuttingDown_)
+		put_hidden_nodes(true);
+	keep_engine_running(false);
 	shuttingDown_ = true;
 	remove_cage_preview();
 	// The widgets are destroyed after this, by QWidget: what they signal then must not
@@ -1358,6 +1370,25 @@ void BakerWindow::setSlotHidden(bool high, bool hidden)
 	}
 	QPushButton *btn = high ? highHideButton_ : lowHideButton_;
 	btn->setText(tr2("Показать", "Show"));
+}
+
+void BakerWindow::put_hidden_nodes(bool enabled)
+{
+	const auto put = [enabled](int id) {
+		if (NodePtr node = World::getNodeByID(id))
+			node->setEnabled(enabled);
+	};
+	for (int id : highSwitchedOff_)
+		put(id);
+	for (int id : lowSwitchedOff_)
+		put(id);
+	for (const GroupRow &g : groupRows_)
+	{
+		if (g.hideHighButton && g.hideHighButton->isChecked())
+			put(g.highId);
+		if (g.hideLowButton && g.hideLowButton->isChecked())
+			put(g.lowId);
+	}
 }
 
 void BakerWindow::clearSlot(bool high)
@@ -2192,11 +2223,16 @@ void BakerWindow::remove_cage_preview()
 void BakerWindow::stop()
 {
 	if (!shuttingDown_)
+	{
 		saveSettings();
+		// What Hide turned off is on again: after the plugin nothing remembers it.
+		put_hidden_nodes(true);
+	}
 	remove_cage_preview();
 	shuttingDown_ = true;
 	if (property("artist_tool_busy").toBool())
 		cancelBake();
+	keep_engine_running(false);
 	worldConns_.disconnectAll();
 	// The plugin goes away: the readbacks still on their way are taken in now (their
 	// callbacks are code of the plugin), for up to two seconds.
@@ -2289,6 +2325,8 @@ void BakerWindow::onCreateSkewMask()
 		for (int id : lowIds_)
 			if (Ptr<ObjectMeshStatic> part = checked_ptr_cast<ObjectMeshStatic>(World::getNodeByID(id)))
 				BakeCore::assignSkewMask(part, virtualPath.get());
+	// The slot is kept in the nodes: the world has changed and is to be saved.
+	emit ::UnigineEditor::Undo::instance()->worldModified();
 
 	// hide the high-poly so it does not block painting on the low-poly
 	// (viewport-only: baking ignores the hidden state)
@@ -2419,6 +2457,8 @@ int BakerWindow::estimateCaptureSurfaces() const
 					continue;
 				if (mesh->getNumTexCoords0(s) <= 0)
 					continue;
+				if (!BakeGpu::isSurfaceCapturable(high, s))
+					continue;
 				n++;
 			}
 		}
@@ -2428,16 +2468,16 @@ int BakerWindow::estimateCaptureSurfaces() const
 double BakerWindow::ramBytesPerTexel() const
 {
 	const bool emission = emissionCheck_ && emissionCheck_->isChecked();
-	return (emission ? 4.0 : 3.0) * 4.0 + 1.0;
+	return 3.0 * 4.0 + (emission ? 8.0 : 0.0) + 1.0;
 }
 
 int BakerWindow::computeCaptureSize(int surfaceCount, CaptureBudget *outBudget) const
 {
 	// per surface and per texel in SYSTEM RAM: 3 RGBA8 gbuffer images read back
-	// from the GPU (4 with the emission) + 1 coverage byte
+	// from the GPU (and an RGBA16F one with the emission) + 1 coverage byte
 	const double bytesPerTexel = ramBytesPerTexel();
-	// ...and in VIDEO memory: one RGBA8 render target per gbuffer image, plus a
-	// fourth one when the emission pass is on.
+	// ...and in VIDEO memory: one RGBA8 render target per gbuffer image, plus an
+	// RGBA16F one when the emission pass is on.
 	//
 	// The x2 is a deliberate safety factor, not arithmetic. Rendering a surface
 	// needs more GPU memory than the targets this plugin reads back: the engine
@@ -2449,7 +2489,7 @@ int BakerWindow::computeCaptureSize(int surfaceCount, CaptureBudget *outBudget) 
 	// crash. Replace it with a measurement once the before/after VRAM numbers
 	// logged around the capture loop come back from a large bake.
 	const bool emission = emissionCheck_ && emissionCheck_->isChecked();
-	const double bytesPerTexelVram = (emission ? 4.0 : 3.0) * 4.0 * 2.0;
+	const double bytesPerTexelVram = (3.0 * 4.0 + (emission ? 8.0 : 0.0)) * 2.0;
 
 	CaptureBudget b;
 	b.ramFree = availablePhysicalMemory();
@@ -2540,7 +2580,7 @@ void BakerWindow::updateCaptureInfo()
 	const bool emission = emissionCheck_ && emissionCheck_->isChecked();
 	const int chunk = b.chunk > 0 ? b.chunk : 1;
 	const double peakVram
-		= double(chunk) * double(size) * double(size) * (emission ? 32.0 : 24.0) / 1e9;
+		= double(chunk) * double(size) * double(size) * (emission ? 40.0 : 24.0) / 1e9;
 	QString text
 		= tr2("Захват: %1×%1 × %2 поверхн. ≈ %3 ГБ ОЗУ; по %4 за раз ≈ %5 ГБ видеопамяти "
 			  "(%6; свободно: ОЗУ %7 ГБ, видео %8 ГБ)",
@@ -2879,6 +2919,10 @@ void BakerWindow::startBake()
 					continue;
 				if (highMesh->getNumTexCoords0(s) <= 0)
 					continue;
+				// a blending material never reaches the gbuffer: this surface bakes from its
+				// textures (BakeCore falls back where it finds no capture)
+				if (!BakeGpu::isSurfaceCapturable(obj, s))
+					continue;
 				captureItems_.push_back({obj->getID(), s, flatBase + s});
 			}
 			flatBase += highMesh->getNumSurfaces();
@@ -2904,7 +2948,7 @@ void BakerWindow::startBake()
 					maxFlat = std::max(maxFlat, it.flatIndex);
 				captures_.assign(size_t(maxFlat) + 1, BakeGpu::SurfaceCapture());
 				const double texels = double(n) * double(captureSize_) * double(captureSize_);
-				const double perTexelVram = settings_.bakeEmission ? 32.0 : 24.0;
+				const double perTexelVram = settings_.bakeEmission ? 40.0 : 24.0;
 				Unigine::Log::message(
 					"Baker: %d surfaces to capture, capture size = %d (%s%s, free RAM %.1f GB "
 					"-> budget %.1f GB, free VRAM %.1f GB -> budget %.1f GB), %.1f GB RAM for "
@@ -2918,13 +2962,16 @@ void BakerWindow::startBake()
 			}
 			captureStarted_ = false;
 			captureKicked_ = false;
+			captureFailed_ = false;
 			warmupDone_ = false;
 			engineConns_.disconnectAll();
+			// the user may well switch to another program while it bakes
+			keep_engine_running(true);
 			// end of the engine UPDATE phase: no frame is being rendered, the
 			// classic point where samples do render-to-texture
 			Engine::get()->getEventEndUpdate().connect(engineConns_, [this]() { performCaptures(); });
 			statusLabel_->setText(tr2("Захват материалов (GPU)...", "Capturing materials (GPU)..."));
-			captureDeadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(25);
+			captureDeadline_ = std::chrono::steady_clock::now() + CAPTURE_ALLOWANCE;
 			captureTimer_->start(50);
 			return; // continues in performCaptures() + onCaptureTick()
 		}
@@ -2972,7 +3019,7 @@ void BakerWindow::performCaptures()
 		warmupTime_ = std::chrono::steady_clock::now();
 		// The warm-up of a heavy model can take long by itself: the captures get their
 		// whole allowance after it, not what is left of it.
-		captureDeadline_ = warmupTime_ + std::chrono::seconds(25);
+		captureDeadline_ = warmupTime_ + CAPTURE_ALLOWANCE;
 		return; // stay subscribed; the real captures run on a later frame
 	}
 	// give texture streaming and shader compilation time to finish
@@ -3003,16 +3050,22 @@ void BakerWindow::performCaptures()
 		Ptr<ConstMesh> mesh = obj ? obj->getMeshForceRAM() : Ptr<ConstMesh>();
 		if (!mesh)
 			continue;
+		bool noUnwrap = false;
 		BakeGpu::PendingCapturePtr p = BakeGpu::requestSurfaceCapture(obj, mesh, item.surface,
-			captureSize_, captureUVMode_, settings_.bakeEmission);
+			captureSize_, captureUVMode_, settings_.bakeEmission, &noUnwrap);
 		if (p)
 		{
 			p->surface = item.flatIndex; // capture list index = BakeCore's flat surface index
 			pending_.push_back(p);
 		}
 		else
+		{
 			Unigine::Log::warning("Baker: GPU capture request failed for \"%s\" surface %d\n",
 				obj->getName(), item.surface);
+			// nothing to unwrap: this one bakes from its textures; anything else stops the bake
+			if (!noUnwrap)
+				captureFailed_ = true;
+		}
 	}
 	captureCursor_ = chunkEnd;
 	// each render's swap delivers the previous render's readbacks;
@@ -3038,11 +3091,31 @@ void BakerWindow::performCaptures()
 	captureKicked_ = true;
 }
 
+void BakerWindow::keep_engine_running(bool keep)
+{
+	// Through the console, as the editor reads it and its settings set it:
+	// Engine::getBackgroundUpdate() answers by the state of the custom main loop of the
+	// editor, not with this value.
+	if (keep && backgroundUpdateBefore_ < 0)
+	{
+		backgroundUpdateBefore_ = Console::getInt("background_update");
+		Console::setInt("background_update", int(Engine::BACKGROUND_UPDATE_RENDER_ALWAYS));
+	}
+	else if (!keep && backgroundUpdateBefore_ >= 0)
+	{
+		Console::setInt("background_update", backgroundUpdateBefore_);
+		backgroundUpdateBefore_ = -1;
+	}
+}
+
 void BakerWindow::abortCapture(const QString &reason)
 {
 	engineConns_.disconnectAll();
 	captureTimer_->stop();
+	keep_engine_running(false);
 	pending_.clear();
+	// what the chunks before this moment collected: gigabytes on a big model
+	captures_.clear();
 	baking_ = false;
 	setUiLocked(false);
 	// The readbacks already requested are taken in, so that the plugin is free again.
@@ -3051,6 +3124,16 @@ void BakerWindow::abortCapture(const QString &reason)
 	update_busy();
 	progressBar_->setValue(0);
 	statusLabel_->setText(reason);
+}
+
+void BakerWindow::failCapture(const char *what)
+{
+	Unigine::Log::error("Baker: %s: the bake is stopped, no file is written\n", what);
+	abortCapture(tr2("Запекание остановлено: движок не выполнил GPU-захват материалов. Файлы не изменены. "
+		"Запустите ещё раз или выключите \"Как в рендере\" на вкладке Debug.",
+		"Baking stopped: the engine did not make the GPU captures of the materials. No file was changed. "
+		"Try again, or turn As Rendered off in the Debug tab."));
+	QMessageBox::warning(this, "Texture Baker", statusLabel_->text());
 }
 
 void BakerWindow::onCaptureTick()
@@ -3062,6 +3145,10 @@ void BakerWindow::onCaptureTick()
 		return;
 	}
 
+	// Out of focus the engine may stand still in spite of keep_engine_running(): the allowance
+	// runs only with the editor in front, and it is all there when the user comes back.
+	if (QApplication::applicationState() != Qt::ApplicationActive)
+		captureDeadline_ = std::chrono::steady_clock::now() + CAPTURE_ALLOWANCE;
 	const bool deadlinePassed = std::chrono::steady_clock::now() >= captureDeadline_;
 
 	// still waiting for the end-of-render event to fire
@@ -3076,15 +3163,16 @@ void BakerWindow::onCaptureTick()
 			statusLabel_->setText(tr2("Подготовка: стриминг текстур и компиляция шейдеров...",
 				"Warming up: texture streaming and shader compilation..."));
 		if (deadlinePassed)
-		{
-			engineConns_.disconnectAll();
-			captureTimer_->stop();
-			Unigine::Log::warning("Baker: end-of-update event never fired, GPU captures skipped\n");
-			runBake();
-		}
+			failCapture("end-of-update event never fired, the GPU captures did not happen");
 		return;
 	}
 	engineConns_.disconnectAll(); // one-shot: captures already requested
+
+	if (captureFailed_)
+	{
+		failCapture("a GPU capture failed");
+		return;
+	}
 
 	int readyCount = 0;
 	for (const auto &p : pending_)
@@ -3105,8 +3193,17 @@ void BakerWindow::onCaptureTick()
 								  .arg(captureItems_.size()));
 	}
 
-	if (!allReady && !deadlinePassed)
+	if (!allReady)
+	{
+		if (deadlinePassed)
+		{
+			for (const auto &p : pending_)
+				if (!p->ready())
+					Unigine::Log::warning("Baker: GPU readback timed out for surface %d\n", p->surface);
+			failCapture("the GPU readbacks did not arrive");
+		}
 		return;
+	}
 
 	captureTimer_->stop();
 
@@ -3119,23 +3216,9 @@ void BakerWindow::onCaptureTick()
 	if (int(captures_.size()) < maxSurface + 1)
 		captures_.resize(maxSurface + 1);
 
-	int ready = 0, timedOut = 0;
 	for (const auto &p : pending_)
-	{
-		if (p->ready())
-		{
-			captures_[p->surface] = BakeGpu::finishCapture(p);
-			ready++;
-		}
-		else
-		{
-			Unigine::Log::warning("Baker: GPU readback timed out for surface %d\n", p->surface);
-			timedOut++;
-		}
-	}
-	Unigine::Log::message("Baker: captures ready=%d, timed out=%d (timed-out surfaces bake from "
-						  "the base material on the CPU)\n",
-		ready, timedOut);
+		captures_[p->surface] = BakeGpu::finishCapture(p);
+	Unigine::Log::message("Baker: captures ready=%d\n", int(pending_.size()));
 	// releases this chunk's GPU targets — the whole point of chunking, and it
 	// has to happen before the next chunk is requested
 	pending_.clear();
@@ -3152,10 +3235,13 @@ void BakerWindow::onCaptureTick()
 		Engine::get()->getEventEndUpdate().connect(engineConns_, [this]() { performCaptures(); });
 		// same allowance the first chunk gets, and a chunk is smaller than the
 		// whole set used to be
-		captureDeadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(25);
+		captureDeadline_ = std::chrono::steady_clock::now() + CAPTURE_ALLOWANCE;
 		captureTimer_->start();
 		return;
 	}
+
+	// All the captures are in: the ray tracing needs no frames of the engine.
+	keep_engine_running(false);
 
 	// diagnostic dump of the capture atlases (shares the debug zones checkbox)
 	if (debugZonesCheck_->isChecked())
@@ -3171,7 +3257,12 @@ void BakerWindow::onCaptureTick()
 			c.shading->save(QString("%1/baker_gpu_s%2_sh.png").arg(dir).arg(s).toUtf8().constData());
 			c.normal->save(QString("%1/baker_gpu_s%2_n.png").arg(dir).arg(s).toUtf8().constData());
 			if (c.emission)
-				c.emission->save(QString("%1/baker_gpu_s%2_e.png").arg(dir).arg(s).toUtf8().constData());
+			{
+				// a PNG holds no half floats: a copy, cut at 1
+				ImagePtr shown = Image::create(c.emission);
+				if (shown->convertToFormat(Image::FORMAT_RGBA8))
+					shown->save(QString("%1/baker_gpu_s%2_e.png").arg(dir).arg(s).toUtf8().constData());
+			}
 		}
 		Unigine::Log::message("Baker: capture atlases dumped to %s\n", dir.toUtf8().constData());
 	}
@@ -3303,6 +3394,8 @@ void BakerWindow::runBake()
 		report += QString("\n  %1").arg(QString::fromUtf8(result.emissionPath.get()));
 	if (!result.materialPath.empty())
 		report += tr2("\nМатериал: %1", "\nMaterial: %1").arg(QString::fromUtf8(result.materialPath.get()));
+	else
+		report += tr2("\nМатериал не создан: подробности в консоли.", "\nThe material was not made: see the console.");
 	if (result.uvTransformKept)
 		report += tr2("\nУ материала тайлинг (uv_transform), а запечены не все его карты: тайлинг оставлен, "
 			"новые карты тоже тайлятся. Запеките все карты.",

@@ -20,7 +20,8 @@ struct PieceState;
 
 // The names of the data a tool keeps in the root of a road or a line about its last
 // Generate: the files (one per line), their GUIDs, the base name and the folder of the
-// files, and the root that made them (an editor copy has the data of its original).
+// files, and the root that made them and in which world (an editor copy has the data of
+// its original, and a root in a copy of a world its ID too).
 struct GeneratedData
 {
 	const char *files;
@@ -31,8 +32,9 @@ struct GeneratedData
 };
 
 // The files of the last Generate of the root that are its own to write over or remove:
-// none for an editor copy of another root ('own' tells which), and of the others only
-// those still at their paths and that nothing outside the root has as its mesh.
+// none for an editor copy of another root or a root in a copy of the world ('own' tells
+// which), and of the others only those still at their paths and that nothing outside the
+// root has as its mesh.
 QStringList ownGeneratedFiles(const Unigine::NodePtr &root, const GeneratedData &data, bool *own = nullptr);
 // The base name of the files of the next Generate: the one of the last Generate if its
 // files are free in the folder, else one made of 'name' ("name", "name_2", ...). A name

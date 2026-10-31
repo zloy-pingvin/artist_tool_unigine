@@ -10,6 +10,8 @@
 #include <UnigineVisualizer.h>
 
 #include <QByteArray>
+#include <QElapsedTimer>
+#include <QHash>
 #include <QObject>
 #include <QString>
 #include <QVector>
@@ -175,12 +177,13 @@ public:
 	const PathSettings &getSettings() const { return settings_; }
 	void setSettings(const PathSettings &settings);
 
-	// With live update on the objects follow every change of the path; with it off
-	// they are put in place only by rearrange().
+	// With live update on the objects follow every change of the path, a step of the undo
+	// history for every change that moves them; with it off they are put in place only by
+	// rearrange(). It is kept with the path, and is on for a path that has no such value.
 	void setLiveUpdate(bool live);
 	bool isLiveUpdate() const { return live_update_; }
 	// Puts the objects in place; 'undoable' - as one step of the undo history (Rearrange
-	// Now), else as the live update does it, on top of the step that moved the path.
+	// Now), else without one: for objects a step of their own has just made (Fill).
 	void rearrange(bool undoable = false);
 
 	CurvePointsState getSelectedPointsState() const;
@@ -250,6 +253,13 @@ private:
 	QVector<Slot> compute_slots(const CurvePolyline &curve, const QVector<float> &lengths, bool only_fitting) const;
 	Unigine::Math::Mat4 slot_transform(const Slot &slot, float length, const Unigine::Math::vec3 &scale) const;
 	Unigine::Math::Vec3 snap_to_ground(const Unigine::Math::Vec3 &point) const;
+	// Puts the objects in place: as one step ('undoable'), or moving them right away; 'live' -
+	// for the live update, which remembers where they were for the step of commit_live_step().
+	void arrange(bool undoable, bool live);
+	void remember_before_live(const Unigine::NodePtr &object);
+	// What the live update has moved since the last step, as one step: a point dragged moves
+	// the objects in every frame.
+	void commit_live_step();
 	float object_length(const Unigine::NodePtr &object) const;
 	float measure_length(const PlaceableAsset &asset) const;
 	// The entries of the pattern a fill places, in order: the start, the repeated ones
@@ -275,8 +285,15 @@ private:
 
 	bool active_{false};
 	bool live_update_{true};
-	// The next rearrange of Live Update is a step of the undo history (it was turned on).
-	bool rearrange_undoable_{false};
+	// Where the objects the live update has moved were before that, by ID, and the scale they
+	// remembered; and how long ago it last moved them.
+	struct LiveBefore
+	{
+		Unigine::Math::Mat4 transform;
+		QByteArray scale;
+	};
+	QHash<int, LiveBefore> live_before_;
+	QElapsedTimer live_timer_;
 	// The current path has just been made by createPath(): if adding points to it ends
 	// with no points, it is removed.
 	bool discard_if_empty_{false};

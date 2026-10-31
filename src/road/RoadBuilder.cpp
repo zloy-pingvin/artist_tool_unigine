@@ -25,6 +25,7 @@
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -37,6 +38,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 
 using namespace Unigine;
 using ::UnigineEditor::AssetManager;
@@ -181,6 +183,134 @@ double point_width(const NodePtr &point)
 	const double width = QByteArray(data ? data : "").toDouble(&ok);
 	return ok ? Math::clamp(width, MIN_POINT_WIDTH, MAX_POINT_WIDTH) : 1.0;
 }
+
+// A number of a transform as the world file keeps it (World::saveTransform()): what the
+// node has after the world is saved and opened again.
+Math::Scalar saved_number(Math::Scalar value)
+{
+#if defined(USE_DOUBLE) || defined(UNIGINE_DOUBLE)
+	const int digits = 12;
+#else
+	const int digits = 8;
+#endif
+	return Math::Scalar(QByteArray::number(double(value), 'g', digits).toDouble());
+}
+
+// The transform of the node relative to its parent, as the world file keeps it.
+Math::Mat4 saved_local_transform(const NodePtr &node)
+{
+	Math::Mat4 transform = node->getTransform();
+	for (int column = 0; column < 4; ++column)
+	{
+		const Math::Vec3 v(transform.getColumn3(column));
+		transform.setColumn3(column, Math::Vec3(saved_number(v.x), saved_number(v.y), saved_number(v.z)));
+	}
+	return transform;
+}
+
+// The same in the world: made of those of the node and of all its parents.
+Math::Mat4 saved_world_transform(const NodePtr &node)
+{
+	Math::Mat4 transform = saved_local_transform(node);
+	for (NodePtr n = node->getParent(); n; n = n->getParent())
+		transform = saved_local_transform(n) * transform;
+	return transform;
+}
+
+// What a road remembers of what it was generated for (see STATE_DATA).
+QByteArray state_hash(const QByteArray &state)
+{
+	return QCryptographicHash::hash(state, QCryptographicHash::Md5).toHex();
+}
+
+// The points turned as one step of the undo history: turns of the same points right after
+// one another (a value dragged in the Roll field, typed digit by digit) join it, the way
+// SetNodeDataAction::push() joins changes of data.
+class TurnPointsAction final : public ::UnigineEditor::Action
+{
+public:
+	struct Entry
+	{
+		int node{0};
+		Math::Mat4 before;
+		Math::Mat4 after;
+	};
+
+	explicit TurnPointsAction(const QVector<Entry> &entries)
+		: entries_(std::make_shared<QVector<Entry>>(entries))
+	{
+	}
+
+	void apply() override { put(*entries_, true); }
+	void undo() override { put(*entries_, false); }
+	void redo() override { put(*entries_, true); }
+
+	static void push(const QVector<Entry> &entries)
+	{
+		using ::UnigineEditor::Undo;
+		// The last step pushed here, while it is the last one of the history: anything
+		// else that happens to the history ends it.
+		static std::weak_ptr<QVector<Entry>> last;
+		static QElapsedTimer last_time;
+		static bool pushing = false;
+		static QObject context;
+		static bool connected = false;
+		if (!connected)
+		{
+			connected = true;
+			QObject::connect(Undo::instance(), &Undo::activity, &context, []() {
+				if (!pushing)
+					last.reset();
+			});
+		}
+
+		const std::shared_ptr<QVector<Entry>> previous = last.lock();
+		if (previous && last_time.isValid() && last_time.elapsed() < MERGE_MILLISECONDS && previous->size() == entries.size())
+		{
+			bool same = true;
+			for (int i = 0; i < entries.size() && same; ++i)
+				same = (*previous)[i].node == entries[i].node;
+			if (same)
+			{
+				for (int i = 0; i < entries.size(); ++i)
+					(*previous)[i].after = entries[i].after;
+				put(*previous, true);
+				last_time.start();
+				// The step the editor has is changed behind its back: the world is told to be
+				// modified, so that it is not taken for saved.
+				emit Undo::instance()->worldModified();
+				return;
+			}
+		}
+
+		TurnPointsAction *action = new TurnPointsAction(entries);
+		last = action->entries_;
+		pushing = true;
+		Undo::apply(action);
+		pushing = false;
+		last_time.start();
+	}
+
+private:
+	// A turn that comes this soon after the previous one joins its step.
+	static const qint64 MERGE_MILLISECONDS = 1500;
+
+	static void put(const QVector<Entry> &entries, bool after)
+	{
+		// By the action of the editor, not kept as a step: it also tells the editor of the
+		// new transform (the Parameters window, the manipulator).
+		for (const Entry &entry : entries)
+		{
+			if (const NodePtr node = World::getNodeByID(entry.node))
+				::UnigineEditor::SetNodeTransformAction(node, after ? entry.after : entry.before).apply();
+		}
+	}
+
+	// Shared with push(), which tells by it whether the last step is still there.
+	std::shared_ptr<QVector<Entry>> entries_;
+	// Keeps the step among those of the plugin, see releaseUndoActions().
+	SetNodeDataAction counted_;
+};
 
 // The side of the road to the right of the direction it goes in, level.
 Math::Vec3 right_of(const Math::Vec3 &direction)
@@ -951,7 +1081,9 @@ void RoadBuilder::setActive(bool active)
 				World::getNodesByType(type, nodes);
 				for (const NodePtr &node : nodes)
 				{
-					if (node->hasData(HIDDEN_DATA))
+					// Not a piece the editor keeps for its undo: it would be drawn out of the
+					// world. It is shown when it is back.
+					if (node->hasData(HIDDEN_DATA) && isNodeAlive(node))
 					{
 						node->setEnabled(true);
 						node->removeData(HIDDEN_DATA);
@@ -1082,8 +1214,7 @@ void RoadBuilder::setSelectedPointsRoll(double roll)
 	// The point is turned about the way the curve goes through it; it keeps its place
 	// and its scale. One undo step for all of them.
 	const CurvePoints points = editor_.getPoints();
-	using namespace ::UnigineEditor;
-	Undo::begin();
+	QVector<TurnPointsAction::Entry> turns;
 	for (int i = 0; i < points.count(); ++i)
 	{
 		const NodePtr point = path->getChild(i);
@@ -1096,11 +1227,16 @@ void RoadBuilder::setSelectedPointsRoll(double roll)
 		const Math::Vec3 forward = unitOrZero(level(points.direction(i)));
 		if (Math::length2(forward) == 0.0)
 			continue;
-		const Math::Mat4 transform = Math::translate(point->getWorldPosition())
+		TurnPointsAction::Entry turn;
+		turn.node = point->getID();
+		turn.before = point->getWorldTransform();
+		turn.after = Math::translate(point->getWorldPosition())
 			* Math::Mat4(curvePointBasis(forward, roll) * Math::scale(point->getWorldScale()));
-		Undo::apply(new SetNodeTransformAction(point, transform));
+		if (turn.before != turn.after)
+			turns.append(turn);
 	}
-	Undo::commit();
+	if (!turns.isEmpty())
+		TurnPointsAction::push(turns);
 	notify_changed();
 }
 
@@ -1228,6 +1364,9 @@ bool RoadBuilder::cloneRoad()
 	if (!hasRoad())
 		return false;
 	setAddingPoints(false);
+	// A new road left without points has just been removed by that.
+	if (!hasRoad())
+		return false;
 	show_hidden_pieces();
 
 	// The points and the settings; the mesh is the copy's own, made by its Generate.
@@ -1274,6 +1413,9 @@ bool RoadBuilder::removeRoadCurve()
 	if (!hasRoad())
 		return false;
 	setAddingPoints(false);
+	// A new road left without points has just been removed by that.
+	if (!hasRoad())
+		return false;
 	show_hidden_pieces();
 
 	// The pieces go to a node of the name of the road, where the road was; the road
@@ -1312,6 +1454,9 @@ bool RoadBuilder::removeRoad(bool files)
 	if (!hasRoad())
 		return false;
 	setAddingPoints(false);
+	// A new road left without points has just been removed by that.
+	if (!hasRoad())
+		return false;
 	show_hidden_pieces();
 
 	const NodePtr root = root_;
@@ -1625,7 +1770,7 @@ void RoadBuilder::save_settings(bool undoable, bool merge)
 ////////////////////////////////////////////////////////////////////////////////
 // The grid.
 ////////////////////////////////////////////////////////////////////////////////
-QByteArray RoadBuilder::snapshot() const
+QByteArray RoadBuilder::snapshot(bool as_saved) const
 {
 	QByteArray state;
 	const NodePtr path = editor_.getPathNode();
@@ -1678,13 +1823,17 @@ QByteArray RoadBuilder::snapshot() const
 			putBytes(state, part.auto_length ? -1.0 : double(part.length));
 		}
 	}
+	// The bytes without 'as_saved' are not to change: the roads generated by the builds
+	// before have their hash.
+	const Math::Mat4 saved_path = as_saved ? saved_world_transform(path) : Math::Mat4_identity;
 	for (int i = 0, num = path->getNumChildren(); i < num; ++i)
 	{
 		const NodePtr point = path->getChild(i);
-		putBytes(state, point->getWorldPosition());
+		const Math::Mat4 transform = as_saved ? saved_path * saved_local_transform(point) : point->getWorldTransform();
+		putBytes(state, as_saved ? Math::Vec3(transform.getColumn3(3)) : Math::Vec3(point->getWorldPosition()));
 		putBytes(state, double(isCornerPoint(point)));
 		putBytes(state, double(isPointFlag(point, CURVE_OFF_GROUND_DATA)));
-		putBytes(state, Math::Vec3(point->getWorldTransform().getColumn3(2)));
+		putBytes(state, Math::Vec3(transform.getColumn3(2)));
 		putBytes(state, point_width(point));
 	}
 	return state;
@@ -1785,6 +1934,8 @@ void RoadBuilder::rebuild_grid(bool on_ground)
 	if (settings_.output == ROAD_OUTPUT_BENT)
 		load_bend_parts();
 	grid_state_ = snapshot();
+	grid_hash_ = state_hash(snapshot(true));
+	grid_old_hash_ = state_hash(grid_state_);
 	grid_draft_ = !on_ground && settings_.snap_to_ground && settings_.output != ROAD_OUTPUT_BENT;
 
 	const CurvePoints points = editor_.getPoints();
@@ -2126,8 +2277,9 @@ bool RoadBuilder::isOutdated() const
 {
 	if (!hasRoad() || getNumPieces() == 0)
 		return false;
-	const QByteArray hash = QCryptographicHash::hash(snapshot(), QCryptographicHash::Md5).toHex();
-	return dataString(root_, STATE_DATA).toUtf8() != hash;
+	// A road generated by the builds before has the hash of the plain bytes.
+	const QByteArray hash = dataString(root_, STATE_DATA).toUtf8();
+	return hash != state_hash(snapshot(true)) && hash != state_hash(snapshot());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2573,10 +2725,18 @@ bool RoadBuilder::generate()
 			pattern = child;
 	}
 	// What the pieces have now, before their files are written anew: the surfaces of the
-	// old mesh are still there to be read.
+	// old mesh are still there to be read. Those of all the pieces: the ones that go away
+	// have those files too until then, and Ctrl+Z brings them back.
+	QHash<int, PieceState> piece_states;
+	for (int i = 0, num = holder->getNumChildren(); i < num; ++i)
+	{
+		const NodePtr child = holder->getChild(i);
+		if (is_piece(child))
+			piece_states.insert(child->getID(), PieceState::ofAll(child));
+	}
 	QVector<PieceState> old_states;
 	for (const NodePtr &piece : old_pieces)
-		old_states.append(PieceState::of(piece));
+		old_states.append(piece_states.value(piece->getID()));
 	Vector<NodePtr> created;
 	QVector<NodePtr> kept;
 	QVector<Math::Mat4> kept_transforms;
@@ -2679,7 +2839,10 @@ bool RoadBuilder::generate()
 					if (!settings && before.surfaces.size() == 1 && object->getNumSurfaces() == 1)
 						settings = &before.surfaces[0];
 					if (settings)
+					{
 						PieceState::putSurface(node, s, *settings);
+						PieceState::putExtras(node, s, *settings);
+					}
 				}
 			}
 			node->setName(name.toUtf8().constData());
@@ -2694,14 +2857,17 @@ bool RoadBuilder::generate()
 		{
 			// The surfaces the first piece has now (its settings were put back above): a
 			// new mesh with a surface of another name would get the default material.
-			const PieceState first = bent ? PieceState() : PieceState::of(pattern);
+			const PieceState first = bent ? PieceState() : PieceState::ofAll(pattern);
 			node = pattern->clone();
 			set_mesh_path(node, mesh_path);
 			if (decal)
 				checked_ptr_cast<DecalMesh>(node)->setRadius(settings_.decal_depth);
 			else if (!bent && first.surfaces.size() == 1 && node->getType() == Node::OBJECT_MESH_STATIC
 				&& checked_ptr_cast<ObjectMeshStatic>(node)->getNumSurfaces() == 1)
+			{
 				PieceState::putSurface(node, 0, first.surfaces[0]);
+				PieceState::putExtras(node, 0, first.surfaces[0]);
+			}
 		} else if (decal)
 		{
 			DecalMeshPtr decal_mesh = DecalMesh::create(mesh_path.get());
@@ -2778,9 +2944,41 @@ bool RoadBuilder::generate()
 	// the new ones in, the extra ones out, and what the road remembers of its Generate.
 	SetNodeDataAction *data_action = new SetNodeDataAction;
 	setGeneratedData(data_action, root_, road_generated_data(), generatedFileList(files, old_files), base, folder);
-	data_action->set(root_, STATE_DATA, QCryptographicHash::hash(snapshot(), QCryptographicHash::Md5).toHex());
+	data_action->set(root_, STATE_DATA, state_hash(snapshot(true)));
 	data_action->set(root_, KIND_DATA, kind.toUtf8());
-	commitGenerate(file_action, kept, kept_states, kept_transforms, created, removed, data_action);
+
+	// The pieces that come and go are in the step too, as they do not move: when a file is
+	// written over, every piece that has it starts the surfaces of a new name from nothing,
+	// a removed one and one the undo has taken away as well. Ctrl+Z and Ctrl+Y write the
+	// files again, so such a piece gets back what it had each time.
+	QVector<NodePtr> step_pieces = kept;
+	QVector<PieceState> step_states = kept_states;
+	QVector<Math::Mat4> step_transforms = kept_transforms;
+	for (const NodePtr &node : removed)
+	{
+		step_pieces.append(node);
+		step_states.append(piece_states.value(node->getID()));
+		step_transforms.append(node->getWorldTransform());
+	}
+	for (const NodePtr &node : created)
+	{
+		step_pieces.append(node);
+		step_states.append(PieceState::ofAll(node));
+		step_transforms.append(node->getWorldTransform());
+	}
+	// What the step of the pieces does not give back, around it (see SetPieceExtrasAction).
+	SetPieceExtrasAction *extras_undone = new SetPieceExtrasAction(SetPieceExtrasAction::ON_UNDO);
+	SetPieceExtrasAction *extras_redone = new SetPieceExtrasAction(SetPieceExtrasAction::ON_REDO);
+	for (int i = 0; i < step_pieces.size(); ++i)
+	{
+		extras_undone->add(step_pieces[i], step_states[i]);
+		extras_redone->add(step_pieces[i], PieceState::ofAll(step_pieces[i]));
+	}
+	::UnigineEditor::Undo::begin();
+	::UnigineEditor::Undo::apply(extras_undone);
+	commitGenerate(file_action, step_pieces, step_states, step_transforms, created, removed, data_action);
+	::UnigineEditor::Undo::apply(extras_redone);
+	::UnigineEditor::Undo::commit();
 
 	report(MSG_INFO, uiText("Generated %1 pieces, %2 triangles, in %3.", "Создано кусков: %1, треугольников: %2, папка: %3.")
 		.arg(kept.size() + created.size()).arg(bent ? bend_.triangles : grid_.numTriangles())
@@ -2845,6 +3043,8 @@ void RoadBuilder::update()
 			load_settings();
 			editor_.setClosed(settings_.closed);
 			apply_decal_settings();
+			// The material is not a part of the state of the grid: the preview gets it here.
+			preview_dirty_ = true;
 			notify_changed();
 		}
 	}
@@ -3373,6 +3573,7 @@ void RoadBuilder::apply_bend_materials(const ObjectPtr &object, const PieceState
 			if (const PieceState::Surface *settings = keep->surface(object->getSurfaceName(surface)))
 			{
 				PieceState::putSurface(object, surface, *settings);
+				PieceState::putExtras(object, surface, *settings);
 				continue;
 			}
 		}
@@ -3803,7 +4004,8 @@ void RoadBuilder::update_preview()
 
 bool RoadBuilder::is_up_to_date() const
 {
-	return dataString(root_, STATE_DATA).toUtf8() == QCryptographicHash::hash(grid_state_, QCryptographicHash::Md5).toHex();
+	const QByteArray hash = dataString(root_, STATE_DATA).toUtf8();
+	return hash == grid_hash_ || hash == grid_old_hash_;
 }
 
 void RoadBuilder::setHideOutdated(bool hide)
@@ -3841,7 +4043,9 @@ void RoadBuilder::update_hidden_pieces()
 void RoadBuilder::show_hidden_pieces()
 {
 	const auto show = [](const NodePtr &piece) {
-		if (piece && !piece.isDeleted() && piece->hasData(HIDDEN_DATA))
+		// Not a piece the editor keeps for its undo: it would be drawn out of the world. It
+		// is shown when it is back, by the search of the "mesh" of its road below.
+		if (isNodeAlive(piece) && piece->hasData(HIDDEN_DATA))
 		{
 			piece->setEnabled(true);
 			piece->removeData(HIDDEN_DATA);

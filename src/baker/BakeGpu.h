@@ -20,7 +20,8 @@ struct SurfaceCapture
 	Unigine::ImagePtr shading; // r = metalness, g = f0(specular), b = translucent, a = microfiber
 	Unigine::ImagePtr normal;  // rgb = octahedral-packed tangent-space normal, a = roughness
 	// final frame of the isolated render (black environment, no lights) =
-	// the emission pass output alone; null when emission capture was not requested
+	// the emission pass output alone, linear and HDR (RGBA16F, can be above 1);
+	// null when emission capture was not requested
 	Unigine::ImagePtr emission;
 
 	// capture texture coordinate per triangle CORNER of the surface (three
@@ -84,9 +85,15 @@ using PendingCapturePtr = std::shared_ptr<PendingCapture>;
 // uvChannelMode: -1 = auto (pick the channel whose charts overlap less),
 // 0 / 1 = force UV0 / UV1 (still falls back to UV0 if UV1 is missing/degenerate).
 // captureEmission additionally reads back the final render image (emission).
+// noUnwrap tells a surface that has nothing to capture (no usable UV charts: it bakes
+// from its textures) from a capture that failed: true only for the former.
 PendingCapturePtr requestSurfaceCapture(const Unigine::Ptr<Unigine::ObjectMeshStatic> &obj,
 	const Unigine::Ptr<Unigine::ConstMesh> &mesh, int surface, int size, int uvChannelMode = -1,
-	bool captureEmission = false);
+	bool captureEmission = false, bool *noUnwrap = nullptr);
+
+// False for a surface whose material never reaches the gbuffer (it blends, or is water): a
+// capture of it would hold the black background alone, so it bakes from its textures.
+bool isSurfaceCapturable(const Unigine::Ptr<Unigine::ObjectMeshStatic> &obj, int surface);
 
 // Converts a completed pending capture into a usable SurfaceCapture
 // (orientation fix, decompression).

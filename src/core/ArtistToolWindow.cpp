@@ -6,6 +6,7 @@
 #include "MeasurePage.h"
 #include "ObjectPlacerPage.h"
 #include "PathPlacerPage.h"
+#include "PhysicsDropPage.h"
 #include "RoadBuilderPage.h"
 #include "UiHelpers.h"
 #include "WireBuilderPage.h"
@@ -117,7 +118,7 @@ public:
 		// Every tab a button of its own in a dull color of its own, the colors of the
 		// rainbow in order; the open one in a bright color of the same hue, a gray tab in
 		// a lighter gray.
-		const double rainbow[] = {0.0, 0.08, 0.125, 0.33, 0.535, 0.62, 0.78};
+		const double rainbow[] = {0.0, 0.08, 0.125, 0.33, 0.535, 0.62, 0.78, 0.9};
 		const double hue = rainbow[colored_tabs_ % int(std::size(rainbow))];
 		const double tint = colored ? 1.0 : 0.0;
 		if (colored)
@@ -274,6 +275,10 @@ ArtistToolWindow::ArtistToolWindow(QWidget *parent)
 	tabs_->addTab(baker_page_, QIcon(QString::fromUtf8(":/images/icon_ambient_occlusion.png")),
 		uiText("Baker", "Бейкер"));
 
+	physics_drop_page_ = new PhysicsDropPage;
+	tabs_->addTab(physics_drop_page_, QIcon(QString::fromUtf8(":/images/tools/icon_play_physics.png")),
+		QString::fromUtf8("Physics Drop"));
+
 	tabs_->addTab(build_debug_page(), QIcon(QString::fromUtf8(":/images/icon_gear_small.png")), QString::fromUtf8("Debug"), false);
 
 	layout->addWidget(build_about_label());
@@ -402,6 +407,7 @@ void ArtistToolWindow::reset_all_settings()
 	old_curve_->setChecked(false);
 	clutter_unpack_page_->resetSettings();
 	baker_page_->resetSettings();
+	physics_drop_page_->resetSettings();
 }
 
 void ArtistToolWindow::hideEvent(QHideEvent *event)
@@ -413,12 +419,17 @@ void ArtistToolWindow::hideEvent(QHideEvent *event)
 	// out of sight) when that is over.
 	QTimer::singleShot(0, this, [this]() {
 		if (!isVisible() && !::UnigineEditor::WindowManager::isVisible(this))
+		{
 			object_placer_page_->resetFilter();
+			// Its menu is off for the time of a session: the window could not be opened again to end it.
+			physics_drop_page_->finishRunning();
+		}
 	});
 }
 
 void ArtistToolWindow::shutdown()
 {
+	physics_drop_page_->stop();
 	clutter_unpack_page_->cancel();
 	object_placer_page_->stop();
 	path_placer_page_->stop();

@@ -14,6 +14,7 @@ class IconBrowserPage;
 class MeasurePage;
 class ObjectPlacerPage;
 class PathPlacerPage;
+class PhysicsDropPage;
 class RoadBuilderPage;
 class UiGalleryPage;
 class WireBuilderPage;
@@ -52,6 +53,7 @@ private:
 	RoadBuilderPage *road_builder_page_{nullptr};
 	WireBuilderPage *wire_builder_page_{nullptr};
 	MeasurePage *measure_page_{nullptr};
+	PhysicsDropPage *physics_drop_page_{nullptr};
 	UiGalleryPage *ui_gallery_page_{nullptr};
 	IconBrowserPage *icon_browser_page_{nullptr};
 };

@@ -341,6 +341,9 @@ int axis_key(const QKeyEvent *key)
 MeasureTool::MeasureTool(QObject *parent)
 	: QObject(parent)
 {
+	// The engine does not update while the editor is in the background, and the pointer of
+	// Windows must not stay slow in the other programs.
+	connect(qApp, &QGuiApplication::applicationStateChanged, this, [this]() { update_slow_cursor(); });
 }
 
 MeasureTool::~MeasureTool()
@@ -1007,7 +1010,8 @@ void MeasureTool::update_slow_cursor()
 {
 	// Only while points are put or dragged, and not while the camera flies (Shift
 	// speeds it up then).
-	const bool slow = active_ && (measuring_ || drag_.isValid()) && key_held(KEY_SHIFT)
+	const bool slow = active_ && QGuiApplication::applicationState() == Qt::ApplicationActive
+		&& (measuring_ || drag_.isValid()) && key_held(KEY_SHIFT)
 		&& !key_held(KEY_RIGHT_BUTTON) && !key_held(KEY_MIDDLE_BUTTON) && viewport_under_mouse();
 
 #ifdef _WIN32
@@ -1151,15 +1155,17 @@ bool MeasureTool::eventFilter(QObject *watched, QEvent *event)
 			if (event->type() == QEvent::KeyPress && !key->isAutoRepeat())
 			{
 				const bool tap = (code == Qt::Key_Alt || code == Qt::Key_Control) && measuring_
-					&& viewport_under_mouse();
+					&& viewport_under_mouse() && !isTypingInField(watched);
 				tap_key_ = tap ? code : 0;
 			}
 			const int axis = axis_key(key);
 			if (code != Qt::Key_Escape && code != Qt::Key_Backspace && axis < 0)
 				break;
 			// The keys are the tool's only in a viewport: in a text field of the editor
-			// they are left alone, wherever the mouse is.
-			if (is_text_input(watched) || is_text_input(QApplication::focusWidget()))
+			// they are left alone, wherever the mouse is, and so they are while a dialog or a
+			// menu is open, even with the mouse over a viewport: Esc closes that first.
+			if (is_text_input(watched) || is_text_input(QApplication::focusWidget()) || isTypingInField(watched)
+				|| (code == Qt::Key_Escape && !isEscapeFree(watched)))
 				break;
 			if (!findViewportWidget(watched) && !viewport_under_mouse())
 				break;

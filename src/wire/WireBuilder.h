@@ -308,9 +308,9 @@ public:
 	// bottom.
 	bool hasPolesWithoutPoints() const;
 
-	// A line that connects poles of the world: while on, every node selected in the
-	// editor is added to the end of the line as a pole. A line made by createLinkLine()
-	// that is left without poles is removed.
+	// A line that connects poles of the world: while on, every node clicked in a viewport
+	// or in a list of nodes is added to the end of the line as a pole. A line made by
+	// createLinkLine() that is left without poles is removed.
 	void setAddingPoles(bool adding);
 	bool isAddingPoles() const { return adding_poles_; }
 	// Adds the nodes selected now to the end of the line, in the order of selecting.
@@ -465,8 +465,6 @@ private:
 	void lines_changed();
 	// What is found from the settings is found again.
 	void settings_changed();
-	// The selections seen while poles are picked (see selectionChanged()).
-	void remember_selection(const QSet<int> &selected);
 	void discard_empty_line(bool poles);
 	static PlaceableAsset asset_of(const WirePolePart &part);
 	PlaceableAsset mesh_asset() const;
@@ -502,8 +500,8 @@ private:
 
 	// The wires the line has now, from its poles.
 	QVector<WireEnds> wire_ends() const;
-	// Everything the wires depend on.
-	QByteArray snapshot(const QVector<WireEnds> &ends) const;
+	// Everything the wires depend on; without the places of their ends, unless 'with_places'.
+	QByteArray snapshot(const QVector<WireEnds> &ends, bool with_places = true) const;
 	void rebuild(const QVector<WireEnds> &ends);
 	// The poles the line is cut into pieces at (see cuts_).
 	void find_cuts();
@@ -547,6 +545,8 @@ private:
 	void report(int level, const QString &text) const;
 
 	Unigine::NodePtr root_;
+	// A line is the current one, whatever became of the node of root_.
+	bool line_open_{false};
 	Unigine::NodePtr parent_;
 	// The points of a line drawn as a curve.
 	CurveEditor editor_;
@@ -584,6 +584,13 @@ private:
 	int triangles_{0};
 	// What the wires were last made for.
 	QByteArray state_;
+	// The same in the form the data of a line keeps it: the hash of all but the places of the
+	// ends of the wires, and those places, x y z of both ends of every wire.
+	QByteArray shape_hash_;
+	QVector<double> end_values_;
+	// The places the data of the line has, and the text they were read from.
+	mutable QByteArray stored_ends_text_;
+	mutable QVector<double> stored_ends_;
 
 	BendSource mesh_source_;
 	QString mesh_source_path_;
@@ -599,8 +606,9 @@ private:
 	// The nodes that were selected the last time the selection changed: only the ones
 	// selected after that are added as poles.
 	QSet<int> selected_before_;
-	// Started by Ctrl+Z / Ctrl+Y: the selection the undo puts back is not a pole picked.
-	QVector<QSet<int>> recent_selections_;
+	// The last thing done was a click that picks a node: the selection that comes now is a pole
+	// picked, not one an undo puts back (see eventFilter()).
+	bool pole_click_{false};
 	// The frame of update(), and what is found once a frame.
 	int frame_{0};
 	mutable bool poles_cached_{false};

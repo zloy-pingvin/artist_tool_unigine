@@ -1,5 +1,6 @@
 #include "artist_tool.h"
 #include "ArtistToolWindow.h"
+#include "AssetBrowserJump.h"
 #include "AssetLocator.h"
 #include "UndoActions.h"
 
@@ -27,11 +28,14 @@ bool artist_tool::init()
 
 	action_ = menu->addAction("Artist Tools", this, &artist_tool::showWindow);
 	asset_locator_ = new ArtistTool::AssetLocator(this);
+	asset_browser_jump_ = new ArtistTool::AssetBrowserJump(this);
 	return true;
 }
 
 void artist_tool::shutdown()
 {
+	delete asset_browser_jump_;
+	asset_browser_jump_ = nullptr;
 	delete asset_locator_;
 	asset_locator_ = nullptr;
 

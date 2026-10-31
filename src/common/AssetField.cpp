@@ -2,6 +2,7 @@
 #include "UiHelpers.h"
 
 #include <editor/UnigineAssetDialogs.h>
+#include <editor/UnigineAssetManager.h>
 #include <editor/UnigineSelection.h>
 #include <editor/UnigineSelector.h>
 
@@ -132,7 +133,11 @@ AssetField::AssetField(const Options &options, QWidget *parent)
 			Vector<UGUID> guids;
 			if (asset.runtime_guid.isValid())
 				guids.append(asset.runtime_guid);
-			if (asset.asset_guid.isValid())
+			// A part of an imported asset (a mesh of an .fbx) picked in the dialog stays that
+			// part: with the GUID of the asset next to it, the whole asset would be taken.
+			const bool part = asset.runtime_guid.isValid() && asset.runtime_guid != asset.asset_guid
+				&& !::UnigineEditor::AssetManager::isRuntimePrimary(asset.runtime_guid);
+			if (asset.asset_guid.isValid() && !part)
 				guids.append(asset.asset_guid);
 			if (on_picked && !guids.empty())
 				on_picked(guids);

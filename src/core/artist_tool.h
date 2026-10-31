@@ -8,6 +8,7 @@ class QAction;
 namespace ArtistTool
 {
 class ArtistToolWindow;
+class AssetBrowserJump;
 class AssetLocator;
 }
 
@@ -32,4 +33,6 @@ private:
 	ArtistTool::ArtistToolWindow *window_{nullptr};
 	// The hotkey and the context menu item that go from a node to its asset.
 	ArtistTool::AssetLocator *asset_locator_{nullptr};
+	// The button of the select dialogs that goes to the folder of the Asset Browser.
+	ArtistTool::AssetBrowserJump *asset_browser_jump_{nullptr};
 };

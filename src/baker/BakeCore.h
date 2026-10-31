@@ -110,8 +110,10 @@ struct BakeGroup
 Result bake(const std::vector<BakeGroup> &groups,
 	const Settings &settings, const ProgressFn &progress);
 
-// Creates (or reuses) the low-poly material, assigns the baked textures and
-// neutralizes the multipliers. Fills result.materialPath.
+// Bakes into <name>_baked.mat: made on the first bake as a child of the material the
+// low-poly has (no other material file is changed), used again afterwards. Assigns the
+// baked textures and neutralizes the multipliers, gives it to the low-poly parts as a step
+// of the undo history. Fills result.materialPath; empty if the material could not be made.
 void assignMaterial(const std::vector<BakeGroup> &groups, Result &result);
 
 // Suggests a cage per low-poly part: probes each part with sparse rays along
